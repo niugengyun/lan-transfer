@@ -313,9 +313,7 @@ export default function App() {
   const [unreadByChat, setUnreadByChat] = useState({});
   /** 电脑端：聊天区「用户列表」弹窗 */
   const [lanUsersModalOpen, setLanUsersModalOpen] = useState(false);
-  /** 在线升级（与 veo3free 行为对齐：启动后静默检查，可手动再查） */
-  const [appVersion, setAppVersion] = useState("");
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  /** 在线升级：仅启动后由前端静默请求服务端 /api/update/check；不在界面提供手动检查按钮 */
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
@@ -379,31 +377,22 @@ export default function App() {
   }, []);
 
   const checkingUpdateRef = useRef(false);
-  const checkForUpdate = useCallback(
-    async (showNoUpdate) => {
-      if (checkingUpdateRef.current) return;
-      checkingUpdateRef.current = true;
-      setCheckingUpdate(true);
-      try {
-        const res = await fetch("/api/update/check");
-        const result = await res.json();
-        setUpdateInfo(result);
-        if (result.success && result.has_update) {
-          setUpdateModalOpen(true);
-        } else if (showNoUpdate && result.success) {
-          message.info("当前已是最新版本");
-        } else if (showNoUpdate && !result.success) {
-          message.warning("检查更新失败，请检查网络连接");
-        }
-      } catch {
-        if (showNoUpdate) message.error("检查更新失败");
-      } finally {
-        checkingUpdateRef.current = false;
-        setCheckingUpdate(false);
+  const checkForUpdateSilent = useCallback(async () => {
+    if (checkingUpdateRef.current) return;
+    checkingUpdateRef.current = true;
+    try {
+      const res = await fetch("/api/update/check");
+      const result = await res.json();
+      setUpdateInfo(result);
+      if (result.success && result.has_update) {
+        setUpdateModalOpen(true);
       }
-    },
-    [message]
-  );
+    } catch {
+      /* 静默失败 */
+    } finally {
+      checkingUpdateRef.current = false;
+    }
+  }, []);
 
   const connectWs = useCallback(() => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -500,7 +489,7 @@ export default function App() {
       if (data.type === "chat_history_cleared") {
         setThreads({ [GROUP_ID]: [] });
         setUnreadByChat({});
-        message.info("所有聊天记录已由本机管理员清空");
+        message.info("所有聊天记录与上传文件已由本机管理员清空");
         return;
       }
       if (data.type === "error") {
@@ -606,28 +595,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch("/api/app/version");
-        if (!r.ok) return;
-        const j = await r.json();
-        if (!cancelled) setAppVersion(String(j.version || "").trim());
-      } catch {
-        /* 忽略 */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     const t = setTimeout(() => {
-      checkForUpdate(false);
+      checkForUpdateSilent();
     }, 3000);
     return () => clearTimeout(t);
-  }, [checkForUpdate]);
+  }, [checkForUpdateSilent]);
 
   useEffect(() => {
     localStorage.setItem(NICK_KEY, nick);
@@ -1574,36 +1546,23 @@ export default function App() {
                 </span>
               </div>
             </header>
-            <div
-              style={{
-                flexShrink: 0,
-                padding: "4px 12px 10px",
-                background: listBg,
-                borderBottom: `1px solid ${borderLine}`,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-              }}
-            >
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {appVersion ? `v${appVersion}` : ""}
-                {updateInfo?.success && updateInfo?.has_update ? (
-                  <Typography.Text type="warning" strong style={{ marginLeft: 8, fontSize: 12 }}>
-                    有新版本 v{updateInfo.latest_version}
-                  </Typography.Text>
-                ) : null}
-              </Typography.Text>
-              <Button
-                type="link"
-                size="small"
-                loading={checkingUpdate}
-                onClick={() => checkForUpdate(true)}
-                style={{ padding: 0, height: "auto", fontSize: 12 }}
+            {updateInfo?.success && updateInfo?.has_update ? (
+              <div
+                style={{
+                  flexShrink: 0,
+                  padding: "4px 12px 10px",
+                  background: listBg,
+                  borderBottom: `1px solid ${borderLine}`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
               >
-                检查更新
-              </Button>
-            </div>
+                <Typography.Text type="warning" strong style={{ fontSize: 12 }}>
+                  有新版本可用
+                </Typography.Text>
+              </div>
+            ) : null}
             </>
           )}
           {isMobile && (
@@ -1663,32 +1622,19 @@ export default function App() {
                   <EditOutlined style={{ fontSize: 14, color: token.colorTextSecondary, flexShrink: 0 }} aria-hidden />
                 </span>
               </div>
-              <div
-                style={{
-                  marginTop: 6,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  {appVersion ? `v${appVersion}` : ""}
-                  {updateInfo?.success && updateInfo?.has_update ? (
-                    <Typography.Text type="warning" strong style={{ marginLeft: 6, fontSize: 11 }}>
-                      可更新 v{updateInfo.latest_version}
-                    </Typography.Text>
-                  ) : null}
-                </Typography.Text>
-                <Button
-                  type="link"
-                  size="small"
-                  style={{ fontSize: 11, padding: 0, height: "auto" }}
-                  loading={checkingUpdate}
-                  onClick={() => checkForUpdate(true)}
+              {updateInfo?.success && updateInfo?.has_update ? (
+                <div
+                  style={{
+                    marginTop: 6,
+                    display: "flex",
+                    alignItems: "center",
+                  }}
                 >
-                  检查更新
-                </Button>
-              </div>
+                  <Typography.Text type="warning" strong style={{ fontSize: 11 }}>
+                    有新版本可用
+                  </Typography.Text>
+                </div>
+              ) : null}
             </div>
           )}
           <div
@@ -2444,7 +2390,7 @@ export default function App() {
         {updateInfo?.success ? (
           <>
             <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-              v{updateInfo.current_version} → v{updateInfo.latest_version}
+              检测到有新版本发布，请前往下载页面获取安装包。
             </Typography.Paragraph>
             {updateInfo.release_notes ? (
               <div

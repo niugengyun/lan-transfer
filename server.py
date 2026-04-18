@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -69,39 +69,10 @@ CHAT_LOG = DATA_DIR / "chat_messages.jsonl"
 _CHAT_LOG_LOCK = threading.RLock()
 
 DEFAULT_HTTP_PORT = 8888
-_SERVER_SETTINGS_PATH = DATA_DIR / "server_settings.json"
-
-
-def _read_persisted_port() -> Optional[int]:
-    """从 data/server_settings.json 读取已保存端口；无文件或无效则返回 None。"""
-    if not _SERVER_SETTINGS_PATH.is_file():
-        return None
-    try:
-        raw = json.loads(_SERVER_SETTINGS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    p = raw.get("port")
-    if isinstance(p, int) and 1 <= p <= 65535:
-        return p
-    if isinstance(p, str) and p.strip().isdigit():
-        v = int(p.strip())
-        if 1 <= v <= 65535:
-            return v
-    return None
-
-
-def _save_persisted_port(port: int) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"port": int(port)}
-    _SERVER_SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _server_port() -> int:
-    """
-    监听端口：环境变量 PORT（非空）优先，否则 data/server_settings.json，否则 DEFAULT_HTTP_PORT。
-    """
+    """监听端口：环境变量 PORT（非空）优先，否则默认 DEFAULT_HTTP_PORT。"""
     env_raw = os.environ.get("PORT")
     if env_raw is not None and str(env_raw).strip() != "":
         try:
@@ -110,50 +81,10 @@ def _server_port() -> int:
                 return v
         except ValueError:
             pass
-    persisted = _read_persisted_port()
-    if persisted is not None:
-        return persisted
     return DEFAULT_HTTP_PORT
 
 
-def _port_config_meta() -> dict[str, Any]:
-    env_raw = os.environ.get("PORT")
-    from_env = env_raw is not None and str(env_raw).strip() != ""
-    return {
-        "port": _server_port(),
-        "persisted_port": _read_persisted_port(),
-        "default_port": DEFAULT_HTTP_PORT,
-        "port_from_env": from_env,
-    }
-
-
-app = FastAPI(title="LAN Transfer")
-
-# WebView 模式下供「停止服务」优雅关闭 Uvicorn（不退出进程）；控制台模式为 None
-_uvicorn_server_holder: list[Any] = [None]
-_running_with_webview_shell = False
-
-_STOPPED_PAGE_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>服务已停止</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-           padding: 48px 24px; text-align: center; background: #f0f2f5; color: #333; line-height: 1.6; }
-    h1 { font-size: 1.35rem; margin-bottom: 12px; }
-    p { max-width: 520px; margin: 12px auto; }
-    code { background: #e6e6e6; padding: 2px 8px; border-radius: 4px; }
-  </style>
-</head>
-<body>
-  <h1>HTTP 服务已停止</h1>
-  <p>局域网快传已关闭，其他设备无法再访问本机页面。</p>
-  <p>本窗口会保留。若要再次启动服务，请<strong>关闭本窗口后重新运行程序</strong>，或在终端执行 <code>python server.py</code>。</p>
-</body>
-</html>
-"""
+app = FastAPI(title="快传-服务端")
 
 
 def _client_host(request: Request) -> str:
@@ -982,15 +913,23 @@ def view_file_inline(stored_name: str) -> FileResponse:
     )
 
 
-@app.post("/api/clear")
-async def clear_uploads(request: Request) -> dict[str, Any]:
-    """清除服务端 uploads 目录下所有已上传文件（仅本机可调）。"""
-    require_localhost(request)
+def _remove_all_upload_files() -> int:
+    """删除 uploads 目录下所有普通文件，返回删除个数。"""
+    if not UPLOAD_DIR.is_dir():
+        return 0
     removed = 0
     for p in UPLOAD_DIR.iterdir():
         if p.is_file():
             p.unlink(missing_ok=True)
             removed += 1
+    return removed
+
+
+@app.post("/api/clear")
+async def clear_uploads(request: Request) -> dict[str, Any]:
+    """清除服务端 uploads 目录下所有已上传文件（仅本机可调）。"""
+    require_localhost(request)
+    removed = _remove_all_upload_files()
     await manager.broadcast_json({"type": "cleared", "removed": removed})
     _op_log(f"已清除服务器全部上传文件，共删除 {removed} 个", request)
     return {"removed": removed}
@@ -998,111 +937,26 @@ async def clear_uploads(request: Request) -> dict[str, Any]:
 
 @app.post("/api/admin/clear-chats")
 async def admin_clear_chat_history(request: Request) -> dict[str, Any]:
-    """清除所有持久化聊天记录（仅本机可调）。"""
+    """清除所有持久化聊天记录，并删除 uploads 下全部已上传文件（仅本机可调）。"""
     require_localhost(request)
     chat_clear_all()
+    removed = _remove_all_upload_files()
+    await manager.broadcast_json({"type": "cleared", "removed": removed})
     await manager.broadcast_json({"type": "chat_history_cleared"})
-    _op_log("已清除全部持久化聊天记录（所有会话）", request)
-    return {"ok": True}
+    _op_log(f"已清除全部持久化聊天记录，并删除全部上传文件（共 {removed} 个）", request)
+    return {"ok": True, "removed_uploads": removed}
 
 
 @app.get("/api/admin/server-info")
 def admin_server_info(request: Request) -> dict[str, Any]:
     """返回局域网用户端端口与地址（仅本机可调，供管理页展示）。"""
     require_localhost(request)
-    meta = _port_config_meta()
-    port = int(meta["port"])
+    port = _server_port()
     lan_ips = _get_lan_ips()
     lan_user_urls = [f"http://{ip}:{port}/" for ip in lan_ips]
     return {
         "port": port,
-        "persisted_port": meta["persisted_port"],
-        "default_port": meta["default_port"],
-        "port_from_env": meta["port_from_env"],
         "lan_user_urls": lan_user_urls,
-    }
-
-
-@app.post("/api/admin/server-settings")
-async def admin_save_server_settings(request: Request) -> dict[str, Any]:
-    """保存 HTTP 端口到 data/server_settings.json（仅本机）；若设置了环境变量 PORT 则仍优先生效，需去掉环境变量后重启才用文件端口。"""
-    require_localhost(request)
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="请求体须为 JSON")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="JSON 须为对象")
-    port_raw = body.get("port")
-    try:
-        port = int(port_raw)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="port 须为整数")
-    if port < 1 or port > 65535:
-        raise HTTPException(status_code=400, detail="port 须在 1–65535 之间")
-    _save_persisted_port(port)
-    _op_log(f"已保存 HTTP 端口配置为 {port}（重启后生效；若设置了环境变量 PORT 则仍以环境变量为准）", request)
-    return {"ok": True, "port": port, "restart_required": True}
-
-
-def _spawn_same_program() -> None:
-    """启动与当前进程相同的命令行（用于重启）。"""
-    if _is_frozen():
-        argv = [sys.executable] + sys.argv[1:]
-    else:
-        argv = [sys.executable] + sys.argv
-    if sys.platform == "win32":
-        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
-        subprocess.Popen(argv, creationflags=flags, close_fds=True)
-    else:
-        subprocess.Popen(argv, start_new_session=True)
-
-
-def _background_restart() -> None:
-    time.sleep(0.2)
-    try:
-        _spawn_same_program()
-    finally:
-        os._exit(0)
-
-
-def _delayed_stop_http_service() -> None:
-    """WebView 模式：只停 Uvicorn 并切换到本地提示页；仅控制台模式则退出进程。"""
-    time.sleep(0.35)
-    srv = _uvicorn_server_holder[0]
-    if srv is not None and _running_with_webview_shell:
-        srv.should_exit = True
-        time.sleep(0.25)
-        try:
-            import webview as wv
-
-            if wv.windows:
-                wv.windows[0].load_html(_STOPPED_PAGE_HTML)
-        except Exception as exc:
-            print(f"[lan-transfer] 停止服务后切换提示页失败: {exc}", flush=True)
-        return
-    os._exit(0)
-
-
-@app.post("/api/admin/restart")
-def admin_restart_service(request: Request, background: BackgroundTasks) -> dict[str, Any]:
-    """重启进程（仅本机）；响应返回后由后台拉起新进程并退出当前进程。"""
-    require_localhost(request)
-    _op_log("收到重启服务指令", request)
-    background.add_task(_background_restart)
-    return {"ok": True, "message": "服务正在重启，请稍候用本机管理页重新打开。"}
-
-
-@app.post("/api/admin/stop")
-def admin_stop_service(request: Request) -> dict[str, Any]:
-    """停止 HTTP 服务（仅本机）。带桌面窗口时不退出进程，仅停 Uvicorn 并显示提示页；仅控制台模式则退出进程。"""
-    require_localhost(request)
-    _op_log("收到停止服务指令", request)
-    threading.Thread(target=_delayed_stop_http_service, daemon=True).start()
-    return {
-        "ok": True,
-        "message": "HTTP 服务正在停止；带桌面窗口时程序将保留，请稍候查看窗口内提示。",
     }
 
 
@@ -1258,7 +1112,7 @@ def index_page() -> FileResponse:
 @app.get("/admin")
 @app.get("/admin/")
 def admin_console_page(request: Request) -> FileResponse:
-    """本机管理控制台（仅回环地址可打开页面）。"""
+    """控制台（仅回环地址可打开页面）。"""
     require_localhost(request)
     admin_html = SPA_DIR / "admin.html"
     if not admin_html.is_file():
@@ -1312,7 +1166,7 @@ def _get_lan_ips() -> list[str]:
 def _print_startup_info(port: int) -> None:
     lan_ips = _get_lan_ips()
     print(f"服务已启动: http://127.0.0.1:{port}", flush=True)
-    print(f"本机管理（仅回环）: http://127.0.0.1:{port}/admin", flush=True)
+    print(f"控制台（仅回环）: http://127.0.0.1:{port}/admin", flush=True)
     print("当前设备的内网 IP：", flush=True)
     if lan_ips:
         for ip in lan_ips:
@@ -1376,11 +1230,8 @@ def _use_webview_shell() -> bool:
 
 def _run_with_webview() -> None:
     """后台线程跑 Uvicorn，主线程跑 pywebview 打开 /admin（关闭窗口后结束进程）。"""
-    global _running_with_webview_shell
     import uvicorn
     import webview
-
-    _running_with_webview_shell = True
 
     if sys.platform == "win32":
         os.environ.setdefault("PYWEBVIEW_BACKEND", "edgechromium")
@@ -1395,7 +1246,6 @@ def _run_with_webview() -> None:
         access_log=False,
     )
     server = uvicorn.Server(config)
-    _uvicorn_server_holder[0] = server
 
     def _serve() -> None:
         server.run()
@@ -1410,14 +1260,14 @@ def _run_with_webview() -> None:
 
     _print_startup_info(port)
     admin_url = f"http://127.0.0.1:{port}/admin/"
-    print(f"正在打开本机管理窗口（WebView）: {admin_url}", flush=True)
+    print(f"正在打开控制台窗口（WebView）: {admin_url}", flush=True)
 
     icon_path = _webview_icon_path()
     if not icon_path:
         print("提示：未找到 icons/app_icon.icns（可先运行 python create_icon.py），程序坞可能显示 Python 默认图标。", flush=True)
 
     webview.create_window(
-        "快传 — 本机管理",
+        "控制台",
         admin_url,
         width=1024,
         height=720,
@@ -1429,14 +1279,97 @@ def _run_with_webview() -> None:
         else:
             webview.start()
     finally:
-        _running_with_webview_shell = False
-        _uvicorn_server_holder[0] = None
         server.should_exit = True
         th.join(timeout=8)
 
 
+_version_status_lock = threading.RLock()
+_version_status_snapshot: dict[str, Any] = {
+    "current_version": "",
+    "latest_version": "",
+    "has_update": False,
+    "check_ok": False,
+    "message": "",
+}
+
+
+def _version_status_refresh_and_print() -> None:
+    """查询 GitHub 最新版、更新内存快照，并在控制台打印一行版本栏。"""
+    from updater import check_for_updates, os_env_dev
+
+    cur = (get_version() or "").strip() or "—"
+    if os_env_dev() or (cur or "").lower() in ("dev", "0.0.0-dev"):
+        msg = f"【版本栏】当前 v{cur}  ·  未请求 GitHub（开发模式或 dev 版本）"
+        with _version_status_lock:
+            _version_status_snapshot.update(
+                current_version=cur,
+                latest_version="",
+                has_update=False,
+                check_ok=False,
+                message=msg,
+            )
+        print(msg, flush=True)
+        return
+
+    info = check_for_updates()
+    latest = (info.latest_version if info else "") or ""
+    has_up = bool(info and info.has_update)
+    ok = info is not None
+
+    if ok and latest:
+        if has_up:
+            tail = "有新版本可升级"
+        else:
+            tail = "已是最新"
+        msg = f"【版本栏】当前 v{cur}  ·  GitHub 最新 v{latest}  ·  {tail}"
+    elif ok:
+        msg = f"【版本栏】当前 v{cur}  ·  GitHub 无版本号  ·  请核对 Release"
+    else:
+        msg = f"【版本栏】当前 v{cur}  ·  未能获取 GitHub 最新版本（网络或未发版）"
+
+    with _version_status_lock:
+        _version_status_snapshot.update(
+            current_version=cur,
+            latest_version=latest,
+            has_update=has_up,
+            check_ok=ok,
+            message=msg,
+        )
+    print(msg, flush=True)
+
+
+def _version_status_bar_loop() -> None:
+    """后台定时刷新版本栏（避免阻塞主线程）。"""
+    time.sleep(3.0)
+    while True:
+        try:
+            _version_status_refresh_and_print()
+        except Exception as exc:
+            line = f"【版本栏】刷新失败: {exc}"
+            print(line, flush=True)
+            with _version_status_lock:
+                _version_status_snapshot["message"] = line
+        time.sleep(900.0)
+
+
+def _start_version_status_bar_thread() -> None:
+    th = threading.Thread(target=_version_status_bar_loop, name="version-status-bar", daemon=True)
+    th.start()
+
+
+@app.get("/api/admin/version-status")
+def admin_version_status(request: Request) -> dict[str, Any]:
+    """返回当前版本与已缓存的 GitHub 最新版本（仅本机；快照由后台线程定期刷新）。"""
+    require_localhost(request)
+    with _version_status_lock:
+        snap = dict(_version_status_snapshot)
+    return snap
+
+
 def main() -> None:
     import uvicorn
+
+    _start_version_status_bar_thread()
 
     port = _server_port()
     host = os.environ.get("HOST", "0.0.0.0")

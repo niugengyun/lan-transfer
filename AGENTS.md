@@ -5,7 +5,7 @@
 **局域网互传（LAN Transfer）**：在同一 Wi‑Fi / 局域网内，用浏览器访问本机跑的服务，实现 **群组广播聊天**、**一对一私聊**、**上传/下载文件**（含聊天里图片/视频预览）。**不需要公网或账号**。
 
 - **主站**：群聊 + 私聊 UI（微信风格），WebSocket 实时消息，聊天记录落在 `data/chat_messages.jsonl`。
-- **本机管理页**：`/admin`，仅 **127.0.0.1** 可打开（清上传、清聊天记录、**保存 HTTP 端口 / 重启 / 停止服务** 等）。
+- **本机管理页**：`/admin`，仅 **127.0.0.1** 可打开（清上传、清聊天记录等）。
 - **可选桌面壳**：直接运行 `python server.py` 时，若已安装 `pywebview` 且未设 `NO_WEBVIEW=1`，会弹窗打开管理页；否则只起 HTTP 服务。
 
 ## 技术栈
@@ -32,7 +32,7 @@ frontend/              # 前端源码
 static/spa/            # 构建后的 SPA（需 build 后才有完整页面）
 static/icon.png        # 可选；仅用于站点路径 /static/icon.png（与打包图标脚本无关）
 uploads/               # 用户上传（.gitignore）；打包后实际在 ~/Documents/lan-transfer/uploads/
-data/                  # 聊天记录、server_settings.json（HTTP 端口）等（.gitignore）；打包后在 ~/Documents/lan-transfer/data/
+data/                  # 聊天记录等（.gitignore）；打包后在 ~/Documents/lan-transfer/data/
 README.md              # 给人看的说明
 ```
 
@@ -73,12 +73,12 @@ pyinstaller lan_transfer.spec --clean
 
 - `**.github/workflows/release.yml**`：推送 `**v***` tag（或 `**workflow_dispatch**` 仅构建产物）时：在 **macOS** 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 **create-dmg** 生成 `**lan-transfer-<tag>-macos.dmg`**；在 **Windows** 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip**`；在 **ubuntu** 上打 `**lan-transfer-<tag>-source.zip`**（源码 + SPA，给 Python 用户）。**仅 tag 推送**时 `**release`** 任务会把上述三个文件发到 **当前仓库** 的 Release（使用 **`GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
 
-发版前把 `**version.py` 里的 `__version__**` 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
+发版前把 **`version.py`** 里的 **`__version__`** 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
 
 ## 在线升级（与 veo3free 前端行为对齐）
 
-- **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；**macOS** 优先 `*macos*.dmg` / `*macos*.zip`，**Windows** 优先 `*windows*.zip` / `.exe`，否则回退含 `lan-transfer` 的 `**.zip`** 如源码包）。
+- **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；**macOS** 优先 `*macos*.dmg` / `*macos*.zip`，**Windows** 优先 `*windows*.zip` / `.exe`，否则回退含 `lan-transfer` 的 `.zip` 如源码包）。
 - **接口**：`GET /api/app/version`、`GET /api/update/check`（返回字段与 veo3free 的 `check_update` 字典一致：`success`、`has_update`、`current_version`、`latest_version`、`release_notes`、`download_url`、`release_url`）。
-- **前端**：启动约 **3 秒**后静默检查；侧栏显示 `**v版本号`** 与 **「检查更新」**；有新版本时弹窗 **「发现新版本」**（更新说明 + **前往下载** 打开浏览器）。
-- **开发跳过检查**：环境变量 `**LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
+- **前端**：启动约 **3 秒**后静默请求 `GET /api/update/check`（由服务端访问 GitHub）；侧栏显示版本号，有新版本时附带简短提示；有新版本时弹窗「发现新版本」（说明 + 前往下载）。**不提供**「检查更新」按钮。
+- **开发跳过检查**：环境变量 **`LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
 
