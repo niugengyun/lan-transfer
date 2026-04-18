@@ -160,6 +160,7 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
           stored: data.stored_name,
           ts: data.ts,
           mine: me.has(data.from_client_id),
+          fileMissing: Boolean(data.file_missing),
           _k: data.id || `f-g-${data.stored_name}`,
         });
       } else {
@@ -175,6 +176,7 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
           stored: data.stored_name,
           ts: data.ts,
           mine: me.has(data.from_client_id),
+          fileMissing: Boolean(data.file_missing),
           _k: data.id || `f-${peer}-${data.stored_name}`,
         });
       }
@@ -336,6 +338,8 @@ export default function App() {
   /** 是否已通过用户手势完成静音 play（否则 WebSocket 里 play 会被桌面 Chrome 拦截） */
   const notificationUnlockedRef = useRef(false);
   const notificationUnlockInFlightRef = useRef(false);
+  /** WebSocket 里 play() 被 WKWebView 等拒绝时置位，待下一次用户手势解锁后补播 */
+  const notificationPlayPendingRef = useRef(false);
 
   const unlockNotificationAudioIfNeeded = useCallback(async () => {
     if (notificationUnlockedRef.current) return;
@@ -377,19 +381,49 @@ export default function App() {
       a.muted = false;
       a.volume = 1;
       a.currentTime = 0;
-      void a.play().catch(() => {});
+      const p = a.play();
+      if (p !== undefined) {
+        void p.catch(() => {
+          notificationPlayPendingRef.current = true;
+        });
+      }
     } catch {
-      /* 忽略 */
+      notificationPlayPendingRef.current = true;
     }
   }, []);
 
   /**
-   * WebSocket 回调里 play() 无用户手势时桌面 Chrome 常拦截；手机触摸易触发解锁。
-   * document 上捕获 mousedown/click/keydown/pointerdown，并在发送消息前 await 静音解锁。
+   * WebSocket 回调里 play() 无用户手势时桌面 Chrome / WKWebView 常拦截；手机触摸易触发解锁。
+   * document 上捕获 mousedown/click/keydown/pointerdown：先静音解锁，再补播此前失败的提示音。
+   * 发送消息前仍会 await 静音解锁（sendText）。
    */
   useEffect(() => {
     const onGesture = () => {
-      void unlockNotificationAudioIfNeeded();
+      void (async () => {
+        await unlockNotificationAudioIfNeeded();
+        if (!notificationPlayPendingRef.current) return;
+        try {
+          if (typeof Audio === "undefined") {
+            notificationPlayPendingRef.current = false;
+            return;
+          }
+          const a = notificationAudioRef.current;
+          if (!a) {
+            notificationPlayPendingRef.current = false;
+            return;
+          }
+          a.muted = false;
+          a.volume = 1;
+          a.currentTime = 0;
+          const p2 = a.play();
+          if (p2 !== undefined) {
+            await p2;
+          }
+          notificationPlayPendingRef.current = false;
+        } catch {
+          /* 仍无播放权限则保留 pending，下次手势再试 */
+        }
+      })();
     };
     const opts = { capture: true, passive: true };
     document.addEventListener("pointerdown", onGesture, opts);
@@ -623,7 +657,34 @@ export default function App() {
         loadFiles();
         return;
       }
+      if (data.type === "uploads_purged" && Array.isArray(data.stored_names)) {
+        const gone = new Set(data.stored_names);
+        setThreads((prev) => {
+          const next = { ...prev };
+          for (const k of Object.keys(next)) {
+            const arr = next[k];
+            if (!Array.isArray(arr)) continue;
+            next[k] = arr.map((row) =>
+              row.kind === "file" && row.stored && gone.has(row.stored) ? { ...row, fileMissing: true } : row
+            );
+          }
+          return next;
+        });
+        loadFiles();
+        return;
+      }
       if (data.type === "cleared") {
+        setThreads((prev) => {
+          const next = { ...prev };
+          for (const k of Object.keys(next)) {
+            const arr = next[k];
+            if (!Array.isArray(arr)) continue;
+            next[k] = arr.map((row) =>
+              row.kind === "file" ? { ...row, fileMissing: true } : row
+            );
+          }
+          return next;
+        });
         loadFiles();
         return;
       }
@@ -1177,9 +1238,12 @@ export default function App() {
       const mine = r.mine;
       const showWho = isGroup && (r.fromLabel || r.uploader);
       const whoName = r.fromLabel || r.uploader || "?";
-      const mediaKind = mediaKindFromFileName(r.name);
-      const inlineSrc = fileInlineUrl(r.stored);
-      const openMedia = () => setMediaPreview({ kind: mediaKind, stored: r.stored, name: r.name });
+      const mediaKind = r.fileMissing ? null : mediaKindFromFileName(r.name);
+      const inlineSrc = r.fileMissing ? "" : fileInlineUrl(r.stored);
+      const openMedia = () => {
+        if (r.fileMissing) return;
+        setMediaPreview({ kind: mediaKind, stored: r.stored, name: r.name });
+      };
       const onMediaKeyDown = (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -1237,7 +1301,23 @@ export default function App() {
                 border: mine ? "none" : "1px solid #eaeaea",
               }}
             >
-              {mediaKind === "image" && (
+              {r.fileMissing ? (
+                <>
+                  <Typography.Text style={{ fontSize: 13, color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT }}>
+                    {r.name}
+                  </Typography.Text>
+                  <Typography.Text
+                    type="secondary"
+                    style={{ fontSize: 12, display: "block", marginTop: 6, lineHeight: 1.5 }}
+                  >
+                    文件已不在服务器（可能已被管理员清理），无法预览或下载。
+                  </Typography.Text>
+                  <Typography.Text style={{ fontSize: 12, color: WX_META, display: "block", marginTop: 4 }}>
+                    {fmtSize(r.size || 0)}
+                  </Typography.Text>
+                </>
+              ) : null}
+              {!r.fileMissing && mediaKind === "image" && (
                 <div
                   role="button"
                   tabIndex={0}
@@ -1259,7 +1339,7 @@ export default function App() {
                   />
                 </div>
               )}
-              {mediaKind === "video" && (
+              {!r.fileMissing && mediaKind === "video" && (
                 <div
                   role="button"
                   tabIndex={0}
@@ -1307,7 +1387,7 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {mediaKind ? (
+              {!r.fileMissing && mediaKind ? (
                 <div>
                   <Typography.Text style={{ fontSize: 13, color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT }}>
                     {r.name}
@@ -1318,7 +1398,8 @@ export default function App() {
                     </Typography.Text>
                   </div>
                 </div>
-              ) : (
+              ) : null}
+              {!r.fileMissing && !mediaKind ? (
                 <>
                   <Typography.Link
                     href={fileDownloadUrl(r.stored)}
@@ -1332,7 +1413,7 @@ export default function App() {
                     </Typography.Text>
                   </div>
                 </>
-              )}
+              ) : null}
             </div>
             <Typography.Text
               style={{

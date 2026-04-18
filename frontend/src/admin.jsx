@@ -1,18 +1,23 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import {
   App as AntApp,
   Button,
   Card,
   ConfigProvider,
+  DatePicker,
+  InputNumber,
   Modal,
   Space,
   Table,
   Typography,
   theme,
 } from "antd";
-import { CloudDownloadOutlined, CopyOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CopyOutlined, FileOutlined, PlayCircleOutlined } from "@ant-design/icons";
 import zhCN from "antd/locale/zh_CN";
+import dayjs from "dayjs";
+
+const { RangePicker } = DatePicker;
 
 /** 弹窗标题居中 */
 const DIALOG_TITLE_CENTER = {
@@ -20,6 +25,28 @@ const DIALOG_TITLE_CENTER = {
     header: { textAlign: "center" },
   },
 };
+
+function fmtSizeAdmin(n) {
+  const x = Number(n) || 0;
+  if (x < 1024) return `${x} B`;
+  if (x < 1024 * 1024) return `${(x / 1024).toFixed(1)} KB`;
+  return `${(x / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileInlineUrl(stored) {
+  return `/api/files/${encodeURIComponent(stored)}/inline`;
+}
+
+function fileDownloadUrl(stored) {
+  return `/api/files/${encodeURIComponent(stored)}/download`;
+}
+
+function mediaKindFromFileName(name) {
+  if (!name || typeof name !== "string") return null;
+  if (/\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name)) return "image";
+  if (/\.(mp4|webm|ogg|mov|m4v|3gp)$/i.test(name)) return "video";
+  return null;
+}
 
 function AdminLanRow({ url, onCopy }) {
   if (!url) return null;
@@ -45,6 +72,13 @@ function AdminApp() {
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const checkingUpdateRef = useRef(false);
+  const [uploads, setUploads] = useState([]);
+  const [uploadsLoading, setUploadsLoading] = useState(false);
+  /** null 表示不按日筛选（列出全部）；有值则按服务端本地日历日筛选 */
+  const [dateRange, setDateRange] = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
+  const [autoPurgeHours, setAutoPurgeHours] = useState(0);
+  const [purgeSaveBusy, setPurgeSaveBusy] = useState(false);
 
   const fetchServerInfo = useCallback(async () => {
     try {
@@ -103,6 +137,60 @@ function AdminApp() {
     return () => clearInterval(t);
   }, [fetchOnline, fetchServerInfo]);
 
+  const queryUploads = useCallback(async () => {
+    setUploadsLoading(true);
+    try {
+      let url = "/api/admin/uploads";
+      if (dateRange && dateRange[0] && dateRange[1]) {
+        const s = dateRange[0].format("YYYY-MM-DD");
+        const e = dateRange[1].format("YYYY-MM-DD");
+        url += `?start=${encodeURIComponent(s)}&end=${encodeURIComponent(e)}`;
+      }
+      const r = await fetch(url);
+      if (r.status === 403) {
+        setUploads([]);
+        message.error("仅本机可查看上传列表");
+        return;
+      }
+      if (!r.ok) {
+        setUploads([]);
+        message.error("查询失败");
+        return;
+      }
+      const j = await r.json();
+      setUploads(Array.isArray(j.files) ? j.files : []);
+    } catch {
+      setUploads([]);
+      message.error("查询失败");
+    } finally {
+      setUploadsLoading(false);
+    }
+  }, [dateRange]);
+
+  useEffect(() => {
+    void queryUploads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅首次进入加载全部
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const pr = await fetch("/api/admin/upload-auto-purge");
+        if (!cancelled && pr.ok) {
+          const pj = await pr.json();
+          const h = Number(pj.hours);
+          if (!Number.isNaN(h)) setAutoPurgeHours(h);
+        }
+      } catch {
+        /* 忽略 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -156,6 +244,57 @@ function AdminApp() {
     return true;
   };
 
+  const postJsonLocal = async (url, body) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let j = {};
+    try {
+      j = await r.json();
+    } catch {
+      /* ignore */
+    }
+    const detail = (j && (j.detail || j.message)) || "";
+    if (r.status === 403) {
+      message.error(detail || "仅本机可执行：请用本机浏览器打开 http://127.0.0.1:端口/admin");
+      return null;
+    }
+    if (!r.ok) {
+      message.error(detail || `请求失败 (${r.status})`);
+      return null;
+    }
+    return j;
+  };
+
+  const saveAutoPurge = async () => {
+    const hv = Number(autoPurgeHours);
+    if (Number.isNaN(hv) || hv < 0) {
+      message.warning("请输入有效的小时数（≥0）");
+      return;
+    }
+    setPurgeSaveBusy(true);
+    try {
+      const j = await postJsonLocal("/api/admin/upload-auto-purge", { hours: hv });
+      if (j && j.hours !== undefined && j.hours !== null) {
+        setAutoPurgeHours(Number(j.hours));
+        message.success("已保存");
+      }
+    } finally {
+      setPurgeSaveBusy(false);
+    }
+  };
+
+  const openFilePreview = useCallback((row) => {
+    const name = (row.display_name || row.stored_name || "").trim() || row.stored_name;
+    setFilePreview({
+      stored: row.stored_name,
+      name,
+      kind: mediaKindFromFileName(name),
+    });
+  }, []);
+
   const onClearChats = () => {
     modal.confirm({
       title: "清除所有聊天记录？",
@@ -178,7 +317,8 @@ function AdminApp() {
   const onClearFiles = () => {
     modal.confirm({
       title: "清除所有已上传文件？",
-      content: "uploads 目录下文件将全部删除，不可恢复。",
+      content:
+        "uploads 目录下文件将全部删除，不可恢复。聊天记录仍会保留其中的文件消息，但聊天内会显示为「文件已不可用」，无法预览或下载。",
       okText: "确定清除",
       okType: "danger",
       cancelText: "取消",
@@ -192,6 +332,156 @@ function AdminApp() {
       },
     });
   };
+
+  const uploadColumns = useMemo(
+    () => [
+      {
+        title: "文件",
+        key: "preview",
+        ellipsis: false,
+        render: (_, row) => {
+          const label = (row.display_name || row.stored_name || "—").toString();
+          const mk = mediaKindFromFileName(label);
+          const inlineSrc = fileInlineUrl(row.stored_name);
+          const open = () => openFilePreview(row);
+          return (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+              {mk === "image" && (
+                <img
+                  src={inlineSrc}
+                  alt=""
+                  width={44}
+                  height={44}
+                  style={{
+                    objectFit: "cover",
+                    borderRadius: 4,
+                    flexShrink: 0,
+                    cursor: "pointer",
+                    background: "rgba(0,0,0,0.06)",
+                  }}
+                  onClick={open}
+                />
+              )}
+              {mk === "video" && (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={open}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      open();
+                    }
+                  }}
+                  style={{
+                    position: "relative",
+                    width: 44,
+                    height: 44,
+                    flexShrink: 0,
+                    borderRadius: 4,
+                    overflow: "hidden",
+                    background: "#111",
+                    cursor: "pointer",
+                  }}
+                >
+                  <video
+                    src={inlineSrc}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "cover",
+                      pointerEvents: "none",
+                    }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(0,0,0,0.35)",
+                      color: "#fff",
+                      fontSize: 18,
+                      pointerEvents: "none",
+                    }}
+                    aria-hidden
+                  >
+                    <PlayCircleOutlined />
+                  </div>
+                </div>
+              )}
+              {!mk && (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={open}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      open();
+                    }
+                  }}
+                  style={{
+                    width: 44,
+                    height: 44,
+                    flexShrink: 0,
+                    borderRadius: 4,
+                    background: "rgba(0,0,0,0.06)",
+                    border: "1px solid rgba(0,0,0,0.08)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: token.colorTextSecondary,
+                    fontSize: 22,
+                    cursor: "pointer",
+                  }}
+                  aria-label="无预览，点击查看"
+                >
+                  <FileOutlined />
+                </div>
+              )}
+              <Typography.Link onClick={open} style={{ minWidth: 0 }} ellipsis>
+                {label}
+              </Typography.Link>
+            </div>
+          );
+        },
+      },
+      {
+        title: "存储名称",
+        dataIndex: "stored_name",
+        ellipsis: true,
+        render: (t) => (
+          <Typography.Text code copyable={{ text: t }} style={{ fontSize: 12 }}>
+            {t}
+          </Typography.Text>
+        ),
+      },
+      {
+        title: "大小",
+        dataIndex: "size",
+        width: 100,
+        render: (s) => fmtSizeAdmin(s),
+      },
+      {
+        title: "上传时间",
+        dataIndex: "modified",
+        width: 200,
+        render: (iso) => {
+          try {
+            return new Date(iso).toLocaleString();
+          } catch {
+            return iso || "—";
+          }
+        },
+      },
+    ],
+    [openFilePreview, token.colorTextSecondary]
+  );
 
   const columns = [
     { title: "昵称", dataIndex: "nick", ellipsis: true },
@@ -213,7 +503,7 @@ function AdminApp() {
   ];
 
   return (
-    <div style={{ padding: 24, maxWidth: 960, margin: "0 auto", background: token.colorBgLayout, minHeight: "100vh" }}>
+    <div style={{ padding: 24, maxWidth: 1120, margin: "0 auto", background: token.colorBgLayout, minHeight: "100vh" }}>
       <div
         style={{
           display: "flex",
@@ -235,8 +525,9 @@ function AdminApp() {
       </div>
       <Typography.Paragraph type="secondary">
         仅当通过本机回环地址（127.0.0.1）访问时可用。可查看当前在线 WebSocket
-        连接；「清除所有聊天记录」会同时删除 uploads 下全部已上传文件；亦可仅清除全部上传文件。
-        桌面端程序有新版本时，将在本页自动弹出提示；请点击「前往下载」在系统默认浏览器中打开发布页或安装包链接。
+        连接、上传文件列表（含缩略预览）；可用日历选择日期范围后点「查询」筛选；可设置超过若干小时未修改的上传文件由服务端自动删除。
+        「清除所有聊天记录」会同时删除 uploads 下全部已上传文件；亦可仅清除全部上传文件。
+        桌面端有新版本时，将在本页自动弹出提示；请点击「前往下载」在系统默认浏览器中打开发布页或安装包链接。
       </Typography.Paragraph>
 
       <Card title="局域网用户端地址" style={{ marginBottom: 16 }}>
@@ -271,7 +562,72 @@ function AdminApp() {
         />
       </Card>
 
-      <Card title="危险操作">
+      <Card title="已上传文件" style={{ marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <Space wrap align="center">
+            <Typography.Text type="secondary">日期筛选</Typography.Text>
+            <RangePicker
+              allowClear
+              value={dateRange}
+              onChange={(v) => setDateRange(v)}
+              format="YYYY-MM-DD"
+            />
+          </Space>
+          <Button type="primary" onClick={() => queryUploads()} loading={uploadsLoading}>
+            查询
+          </Button>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <Space wrap align="center">
+            <Typography.Text type="secondary">自动删除</Typography.Text>
+            <InputNumber
+              min={0}
+              max={17520}
+              step={1}
+              value={autoPurgeHours}
+              onChange={(v) => setAutoPurgeHours(typeof v === "number" ? v : 0)}
+              addonAfter="小时"
+              style={{ width: 168 }}
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              前上传的文件（按文件修改时间；0 关闭，约每 10 分钟检查）
+            </Typography.Text>
+          </Space>
+          <Button type="default" onClick={() => void saveAutoPurge()} loading={purgeSaveBusy}>
+            保存
+          </Button>
+        </div>
+        <Table
+          size="small"
+          rowKey="stored_name"
+          dataSource={uploads}
+          columns={uploadColumns}
+          loading={uploadsLoading}
+          pagination={{ pageSize: 15, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+          scroll={{ x: 720 }}
+          locale={{ emptyText: "暂无数据，请选择日期后点击查询，或不选日期查询全部" }}
+        />
+      </Card>
+
+      <Card title="危险操作（全部）">
         <Space wrap>
           <Button danger onClick={onClearChats} disabled={busy}>
             清除所有聊天记录
@@ -281,6 +637,49 @@ function AdminApp() {
           </Button>
         </Space>
       </Card>
+
+      <Modal
+        title={filePreview?.name || "预览"}
+        open={Boolean(filePreview)}
+        onCancel={() => setFilePreview(null)}
+        destroyOnClose
+        footer={
+          <Space>
+            <Button onClick={() => setFilePreview(null)}>关闭</Button>
+            {filePreview?.stored ? (
+              <Button
+                type="primary"
+                href={fileDownloadUrl(filePreview.stored)}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                下载
+              </Button>
+            ) : null}
+          </Space>
+        }
+        width={Math.min(720, typeof window !== "undefined" ? window.innerWidth - 48 : 700)}
+        {...DIALOG_TITLE_CENTER}
+      >
+        {filePreview?.kind === "image" ? (
+          <img
+            alt=""
+            src={fileInlineUrl(filePreview.stored)}
+            style={{ maxWidth: "100%", maxHeight: 480, display: "block", margin: "0 auto" }}
+          />
+        ) : filePreview?.kind === "video" ? (
+          <video
+            src={fileInlineUrl(filePreview.stored)}
+            controls
+            playsInline
+            style={{ width: "100%", maxHeight: 480, display: "block", background: "#000" }}
+          />
+        ) : (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            该类型无法在页面内预览，请点击「下载」在本地打开。
+          </Typography.Paragraph>
+        )}
+      </Modal>
 
       <Modal
         title="发现新版本"

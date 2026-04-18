@@ -1,4 +1,4 @@
-# 推送 v* tag：构建 macOS DMG、Windows zip、源码 zip，并在当前仓库创建 Release。
+# 推送 v* tag：构建 macOS DMG、Windows zip，并在当前仓库创建 Release（不含源码 zip）。
 # 使用 GITHUB_TOKEN 发版（需在仓库 Settings → Actions → General 允许工作流写权限，或保留默认只读时为本 workflow 开启 contents: write）。
 
 name: Release
@@ -102,40 +102,8 @@ jobs:
           name: windows-exe
           path: dist/lan_transfer.exe
 
-  package-source:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Build SPA
-        run: |
-          cd frontend
-          npm install
-          npm run build
-
-      - name: Zip source distribution
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          mkdir -p pkg/static
-          cp server.py version.py updater.py requirements.txt requirements-build.txt start.sh README.md AGENTS.md create_icon.py lan_transfer.spec pkg/
-          cp -r static/spa pkg/static/
-          cd pkg && zip -r "../lan-transfer-${TAG}-source.zip" .
-
-      - name: Upload source zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-zip
-          path: lan-transfer-${{ github.ref_name }}-source.zip
-
   release:
-    needs: [build-macos, build-windows, package-source]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -158,5 +126,5 @@ jobs:
           repo: lan-transfer
           tag: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          artifacts: "macos-dmg/lan-transfer-${{ github.ref_name }}-macos.dmg,lan-transfer-${{ github.ref_name }}-windows.zip,source-zip/lan-transfer-${{ github.ref_name }}-source.zip"
+          artifacts: "macos-dmg/lan-transfer-${{ github.ref_name }}-macos.dmg,lan-transfer-${{ github.ref_name }}-windows.zip"
           generateReleaseNotes: true

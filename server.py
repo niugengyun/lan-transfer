@@ -7,11 +7,13 @@ Web 前端构建产物位于 static/spa/。
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import mimetypes
 import os
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,7 +21,7 @@ import threading
 import time
 import uuid
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +30,95 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from version import get_version
+
+
+def _win_hide_console_subprocess_kw() -> dict[str, Any]:
+    """Windows 下 subprocess.run 默认可能短暂弹出控制台；附加 CREATE_NO_WINDOW 避免闪烁（如 arp 查询）。"""
+    if platform.system() != "Windows":
+        return {}
+    fl = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if not fl:
+        return {}
+    return {"creationflags": fl}
+
+
+# 运行期间尽量防止系统休眠 / 自动关屏；进程退出后恢复（Windows / 子进程方案在 atexit 中收尾）。
+_sleep_prevent_child: Optional[subprocess.Popen] = None
+_sleep_prevent_installed: bool = False
+
+
+def _prevent_system_sleep_cleanup() -> None:
+    global _sleep_prevent_child
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
+        except Exception:
+            pass
+    if _sleep_prevent_child is not None:
+        try:
+            _sleep_prevent_child.terminate()
+            _sleep_prevent_child.wait(timeout=3)
+        except Exception:
+            pass
+        _sleep_prevent_child = None
+
+
+def _prevent_system_sleep_install() -> None:
+    """程序存活期间尽量保持系统唤醒、屏幕常亮（各平台能力不同，失败则静默跳过）。"""
+    global _sleep_prevent_child, _sleep_prevent_installed
+    if _sleep_prevent_installed:
+        return
+    ok = False
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            prev = ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            )
+            ok = prev != 0
+        elif sys.platform == "darwin":
+            exe = shutil.which("caffeinate") or "/usr/bin/caffeinate"
+            if Path(exe).is_file():
+                _sleep_prevent_child = subprocess.Popen(
+                    [exe, "-di", "-w", str(os.getpid())],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                ok = _sleep_prevent_child.poll() is None
+                if not ok:
+                    _sleep_prevent_child = None
+        elif sys.platform.startswith("linux"):
+            exe = shutil.which("systemd-inhibit")
+            if exe:
+                _sleep_prevent_child = subprocess.Popen(
+                    [
+                        exe,
+                        "--what=sleep:idle:handle-lid-switch",
+                        "--who=lan-transfer",
+                        "--why=局域网快传服务运行中",
+                        "--mode=block",
+                        "sleep",
+                        "infinity",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                ok = _sleep_prevent_child.poll() is None
+                if not ok:
+                    _sleep_prevent_child = None
+    except Exception:
+        ok = False
+        _sleep_prevent_child = None
+    if ok:
+        _sleep_prevent_installed = True
+        atexit.register(_prevent_system_sleep_cleanup)
+        print("已启用：运行期间将尽量防止系统自动休眠与关屏。", flush=True)
 
 
 def _is_frozen() -> bool:
@@ -68,6 +159,10 @@ if not _is_frozen():
 DATA_DIR = WORK_ROOT / "data"
 CHAT_LOG = DATA_DIR / "chat_messages.jsonl"
 _CHAT_LOG_LOCK = threading.RLock()
+
+UPLOAD_AUTO_PURGE_SETTINGS = DATA_DIR / "upload_auto_purge.json"
+_UPLOAD_AUTO_PURGE_FILE_LOCK = threading.RLock()
+_uvicorn_loop: Optional[asyncio.AbstractEventLoop] = None
 
 DEFAULT_HTTP_PORT = 8888
 
@@ -172,6 +267,7 @@ def _lookup_mac_ip_neigh(ip: str) -> Optional[str]:
             text=True,
             timeout=2,
             check=False,
+            **_win_hide_console_subprocess_kw(),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
         return None
@@ -193,6 +289,7 @@ def _lookup_mac_arp_command(ip: str) -> Optional[str]:
                 text=True,
                 timeout=3,
                 check=False,
+                **_win_hide_console_subprocess_kw(),
             )
             out = proc.stdout or ""
             for line in out.splitlines():
@@ -208,6 +305,7 @@ def _lookup_mac_arp_command(ip: str) -> Optional[str]:
             text=True,
             timeout=2,
             check=False,
+            **_win_hide_console_subprocess_kw(),
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if "incomplete" in out.lower():
@@ -356,6 +454,49 @@ def _normalize_client_ids_in_record(rec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _local_date_key_from_file_mtime(st_mtime: float) -> str:
+    """上传文件 mtime 对应服务端本地日历日。"""
+    return datetime.fromtimestamp(st_mtime).date().isoformat()
+
+
+def _parse_ymd_boundary(s: str) -> Optional[str]:
+    s2 = (s or "").strip()[:10]
+    if len(s2) != 10:
+        return None
+    try:
+        date.fromisoformat(s2)
+    except ValueError:
+        return None
+    return s2
+
+
+def _ymd_range_pair(start: str, end: str) -> tuple[str, str]:
+    lo = _parse_ymd_boundary(start)
+    hi = _parse_ymd_boundary(end)
+    if not lo or not hi:
+        raise ValueError("start 与 end 需为 YYYY-MM-DD")
+    if lo > hi:
+        return hi, lo
+    return lo, hi
+
+
+def _history_item_with_file_missing(norm: dict[str, Any]) -> dict[str, Any]:
+    """下发历史时：若 uploads 中已无对应文件，标记 file_missing 供前端占位（与仅清文件、未清聊天记录一致）。"""
+    out = dict(norm)
+    if out.get("type") != "file":
+        return out
+    sn = (out.get("stored_name") or "").strip()
+    if not sn:
+        out["file_missing"] = True
+        return out
+    path = (UPLOAD_DIR / Path(sn).name).resolve()
+    if not str(path).startswith(str(UPLOAD_DIR.resolve())):
+        out["file_missing"] = True
+        return out
+    out["file_missing"] = not path.is_file()
+    return out
+
+
 def _effective_session_client_id(browser_id: str, ip: str) -> tuple[str, str]:
     """WebSocket 会话主键：能解析出局域网 MAC 时用 m_<12hex>，否则沿用浏览器 id。"""
     bid = (browser_id or "").strip() or str(uuid.uuid4())
@@ -412,19 +553,19 @@ def chat_load_for_client(client_id: str) -> list[dict[str, Any]]:
             scope = str(rec.get("scope", "")).strip().lower()
             is_group = (not to_c) or to_c == "__group__" or scope == "group"
             if is_group:
-                rows.append(_normalize_client_ids_in_record(rec))
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
                 continue
             s = (rec.get("sender_client_id") or "").strip()
             if s in ids or to_c in ids:
-                rows.append(_normalize_client_ids_in_record(rec))
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
         elif t == "file":
             to_c = (rec.get("to_client_id") or "").strip()
             if not to_c:
-                rows.append(_normalize_client_ids_in_record(rec))
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
                 continue
             fc = (rec.get("from_client_id") or "").strip()
             if fc in ids or to_c in ids:
-                rows.append(_normalize_client_ids_in_record(rec))
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
     rows.sort(key=lambda r: str(r.get("ts") or ""))
     return rows
 
@@ -661,6 +802,56 @@ def _list_uploads() -> list[dict[str, Any]]:
             }
         )
     return items
+
+
+def _admin_upload_list_entries(filter_lo: Optional[str] = None, filter_hi: Optional[str] = None) -> list[dict[str, Any]]:
+    """管理端上传列表；可选按服务端本地日历日 [filter_lo, filter_hi] 筛选。"""
+    out: list[dict[str, Any]] = []
+    if not UPLOAD_DIR.is_dir():
+        return out
+    for p in sorted(UPLOAD_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        dk = _local_date_key_from_file_mtime(st.st_mtime)
+        if filter_lo is not None and filter_hi is not None:
+            if not (filter_lo <= dk <= filter_hi):
+                continue
+        out.append(
+            {
+                "stored_name": p.name,
+                "display_name": _original_download_name(p.name),
+                "size": st.st_size,
+                "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                "local_date": dk,
+            }
+        )
+    return out
+
+
+def uploads_purge_by_local_date_range(lo: str, hi: str) -> list[str]:
+    """删除 mtime 落在 [lo, hi]（含）内的上传文件，返回已删除的 stored_name。"""
+    removed: list[str] = []
+    if not UPLOAD_DIR.is_dir():
+        return removed
+    for p in UPLOAD_DIR.iterdir():
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        dk = _local_date_key_from_file_mtime(st.st_mtime)
+        if lo <= dk <= hi:
+            try:
+                p.unlink(missing_ok=True)
+                removed.append(p.name)
+            except OSError:
+                pass
+    return removed
 
 
 # 与前端 GROUP_ID 一致
@@ -927,6 +1118,108 @@ def _remove_all_upload_files() -> int:
     return removed
 
 
+def _read_upload_auto_purge_hours() -> float:
+    """自动清理：保留最近 N 小时内修改过的上传；返回 0 表示关闭。配置见 data/upload_auto_purge.json。"""
+    with _UPLOAD_AUTO_PURGE_FILE_LOCK:
+        if not UPLOAD_AUTO_PURGE_SETTINGS.is_file():
+            return 0.0
+        try:
+            raw = UPLOAD_AUTO_PURGE_SETTINGS.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except Exception:
+            return 0.0
+    if not isinstance(data, dict):
+        return 0.0
+    try:
+        h = float(data.get("upload_auto_purge_hours", 0))
+    except (TypeError, ValueError):
+        return 0.0
+    if h <= 0:
+        return 0.0
+    if h > 8760 * 2:
+        return 0.0
+    return h
+
+
+def _write_upload_auto_purge_hours(hours: float) -> None:
+    """写入自动清理小时数；0 或负数按 0 存（关闭）。"""
+    try:
+        hv = float(hours)
+    except (TypeError, ValueError):
+        hv = 0.0
+    if hv < 0:
+        hv = 0.0
+    if hv > 8760 * 2:
+        hv = 8760 * 2
+    body = json.dumps({"upload_auto_purge_hours": hv}, ensure_ascii=False, indent=2) + "\n"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _UPLOAD_AUTO_PURGE_FILE_LOCK:
+        UPLOAD_AUTO_PURGE_SETTINGS.write_text(body, encoding="utf-8")
+
+
+def _purge_stale_uploads_by_age_seconds(max_age_seconds: float) -> list[str]:
+    """删除修改时间早于 now-max_age_seconds 的上传文件，返回已删 stored_name。"""
+    removed: list[str] = []
+    if max_age_seconds <= 0 or not UPLOAD_DIR.is_dir():
+        return removed
+    now = time.time()
+    for p in UPLOAD_DIR.iterdir():
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if now - st.st_mtime > max_age_seconds:
+            try:
+                p.unlink(missing_ok=True)
+                removed.append(p.name)
+            except OSError:
+                pass
+    return removed
+
+
+def _schedule_broadcast_uploads_purged(removed: list[str]) -> None:
+    """在 asyncio 主循环上广播 uploads_purged（供后台线程调用）。"""
+    if not removed:
+        return
+    loop = _uvicorn_loop
+    if loop is None or not loop.is_running():
+        return
+
+    async def _send() -> None:
+        await manager.broadcast_json({"type": "uploads_purged", "stored_names": removed, "removed": len(removed)})
+
+    try:
+        asyncio.run_coroutine_threadsafe(_send(), loop)
+    except Exception as exc:
+        print(f"[upload-auto-purge] 广播失败: {exc}", flush=True)
+
+
+def _upload_auto_purge_loop() -> None:
+    """后台定时扫描：按配置删除过旧的上传文件。"""
+    time.sleep(60)
+    while True:
+        try:
+            hours = _read_upload_auto_purge_hours()
+            if hours > 0:
+                removed = _purge_stale_uploads_by_age_seconds(hours * 3600.0)
+                if removed:
+                    print(f"[upload-auto-purge] 已删除 {len(removed)} 个超过 {hours} 小时的文件", flush=True)
+                    _schedule_broadcast_uploads_purged(removed)
+        except Exception as exc:
+            print(f"[upload-auto-purge] 异常: {exc}", flush=True)
+        time.sleep(600)
+
+
+@app.on_event("startup")
+async def _startup_upload_auto_purge_worker() -> None:
+    global _uvicorn_loop
+    _uvicorn_loop = asyncio.get_running_loop()
+    th = threading.Thread(target=_upload_auto_purge_loop, name="upload-auto-purge", daemon=True)
+    th.start()
+
+
 @app.post("/api/clear")
 async def clear_uploads(request: Request) -> dict[str, Any]:
     """清除服务端 uploads 目录下所有已上传文件（仅本机可调）。"""
@@ -947,6 +1240,73 @@ async def admin_clear_chat_history(request: Request) -> dict[str, Any]:
     await manager.broadcast_json({"type": "chat_history_cleared"})
     _op_log(f"已清除全部持久化聊天记录，并删除全部上传文件（共 {removed} 个）", request)
     return {"ok": True, "removed_uploads": removed}
+
+
+@app.get("/api/admin/uploads")
+def api_admin_uploads_list(
+    request: Request,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """列出 uploads（仅本机）；可选 start、end（YYYY-MM-DD）按服务端本地日历日筛选。"""
+    require_localhost(request)
+    if (start and not end) or (end and not start):
+        raise HTTPException(status_code=400, detail="筛选时请同时提供 start 与 end（YYYY-MM-DD）")
+    if start and end:
+        lo, hi = _ymd_range_pair(start, end)
+        files = _admin_upload_list_entries(lo, hi)
+    else:
+        files = _admin_upload_list_entries(None, None)
+    return {"files": files, "count": len(files)}
+
+
+@app.post("/api/admin/uploads/purge-by-date")
+async def admin_uploads_purge_by_date(request: Request) -> dict[str, Any]:
+    """按服务端本地日历日范围删除 uploads 内文件（仅本机）。"""
+    require_localhost(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="需要 JSON 请求体")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="无效的请求体")
+    try:
+        lo, hi = _ymd_range_pair(str(data.get("start", "")), str(data.get("end", "")))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    removed_names = uploads_purge_by_local_date_range(lo, hi)
+    await manager.broadcast_json({"type": "uploads_purged", "stored_names": removed_names, "removed": len(removed_names)})
+    _op_log(f"按本地日期 {lo}～{hi} 清除上传文件，共删除 {len(removed_names)} 个", request)
+    return {"removed": len(removed_names), "start": lo, "end": hi, "stored_names": removed_names}
+
+
+@app.get("/api/admin/upload-auto-purge")
+def admin_get_upload_auto_purge(request: Request) -> dict[str, Any]:
+    """读取上传自动清理配置：hours>0 表示删除「修改时间」早于该小时数的文件（仅本机）。"""
+    require_localhost(request)
+    return {"hours": _read_upload_auto_purge_hours()}
+
+
+@app.post("/api/admin/upload-auto-purge")
+async def admin_set_upload_auto_purge(request: Request) -> dict[str, Any]:
+    """设置上传自动清理小时数；0 关闭（仅本机）。"""
+    require_localhost(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="需要 JSON 请求体")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="无效的请求体")
+    try:
+        hv = float(data.get("hours", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="hours 须为数字")
+    if hv < 0 or hv > 8760 * 2:
+        raise HTTPException(status_code=400, detail="hours 须在 0～17520 之间")
+    _write_upload_auto_purge_hours(hv)
+    out = _read_upload_auto_purge_hours()
+    _op_log(f"已设置上传自动清理：{out} 小时（0 为关闭，按文件修改时间）", request)
+    return {"hours": out}
 
 
 @app.get("/api/admin/server-info")
@@ -1403,6 +1763,7 @@ def admin_version_status(request: Request) -> dict[str, Any]:
 def main() -> None:
     import uvicorn
 
+    _prevent_system_sleep_install()
     _start_version_status_bar_thread()
 
     port = _server_port()

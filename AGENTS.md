@@ -71,14 +71,14 @@ pyinstaller lan_transfer.spec --clean
 
 与 veo3free 那种「先在私有仓开发、再镜像到公有仓并发 Release」不同：若你**只在公有仓 `niugengyun/lan-transfer` 上开发并推送**，只需 `**release.yml`**，不必再保留「私有 → 公有」的同步工作流（原 `push-public.yml` 已移除：它只在「代码在别的仓库、要自动推到公有 `main`」时才有用）。
 
-- `**.github/workflows/release.yml**`：推送 `**v***` tag（或 `**workflow_dispatch**` 仅构建产物）时：在 **macOS** 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 **create-dmg** 生成 `**lan-transfer-<tag>-macos.dmg`**；在 **Windows** 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip**`；在 **ubuntu** 上打 `**lan-transfer-<tag>-source.zip`**（源码 + SPA，给 Python 用户）。**仅 tag 推送**时 `**release`** 任务会把上述三个文件发到 **当前仓库** 的 Release（使用 **`GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
+- `**.github/workflows/release.yml`**：推送 `**v***` tag（或 `**workflow_dispatch**` 仅构建产物）时：在 **macOS** 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 **create-dmg** 生成 `**lan-transfer-<tag>-macos.dmg`**；在 Windows 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip**`。**仅 tag 推送**时 `**release`** 任务将上述两个文件发到 **当前仓库** 的 Release（使用 `**GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
 
-发版前把 **`version.py`** 里的 **`__version__`** 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
+发版前把 `**version.py`** 里的 `**__version__**` 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
 
 ## 在线升级（与 veo3free 前端行为对齐）
 
 - **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；**macOS** 优先 `*macos*.dmg` / `*macos*.zip`，**Windows** 优先 `*windows*.zip` / `.exe`，否则回退含 `lan-transfer` 的 `.zip` 如源码包）。
 - **接口**：`GET /api/app/version`（任意客户端可读当前版本）；`GET /api/update/check` **仅本机（127.0.0.1）** 可调（返回字段与 veo3free 的 `check_update` 字典一致：`success`、`has_update`、`current_version`、`latest_version`、`release_notes`、`download_url`、`release_url`）；由服务端访问 GitHub。
 - **控制台 `/admin`**：启动约 **3 秒**后静默请求 `GET /api/update/check`；有新版本时弹窗「发现新版本」，「前往下载」经 `POST /api/admin/open-browser` 在系统默认浏览器中打开链接。局域网 **Web 聊天页** 不请求更新、不弹升级窗。
-- **开发跳过检查**：环境变量 **`LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
+- **开发跳过检查**：环境变量 `**LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
 
