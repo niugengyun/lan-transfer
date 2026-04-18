@@ -1,0 +1,88 @@
+/*
+ * 应用壳占满视口、整页不滚动。
+ * .lan-scroll-y：在纵向 flex 列内占满「标题栏 / 搜索框 / 输入栏」之外的剩余高度，仅此区域纵向滚动。
+ */
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  height: 100%;
+  max-height: 100%;
+}
+
+/* Ant Design <AntApp> 包一层，需参与高度链否则内部 flex 无法算出剩余高度 */
+#root > .ant-app {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 业务壳：占满 .ant-app 内剩余空间 */
+.lan-app-shell {
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 左侧栏 + 右侧聊天 的主横向区 */
+.lan-app-main {
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+/* 侧栏会话列表 / 聊天消息区：撑满列内剩余高度并滚动 */
+.lan-app-shell .lan-scroll-y {
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 聊天无消息：整块仍为满高滚动区，内容垂直居中 */
+.lan-app-shell .lan-scroll-y.lan-scroll-y--chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 聊天有消息：行间距由内联外的样式表控制，避免与内联 margin 冲突 */
+.lan-app-shell .lan-scroll-y.lan-chat-messages:not(.lan-scroll-y--chat-empty) > div {
+  margin-bottom: 12px;
+}
+
+/* 最后一条与底部留白（须大于内联曾用的 12px，故用 50px） */
+.lan-app-shell .lan-scroll-y.lan-chat-messages:not(.lan-scroll-y--chat-empty) > div:last-child {
+  margin-bottom: 50px;
+}
+
+/* Modal 内用户列表（不占满屏高） */
+.lan-modal-user-scroll {
+  max-height: 400px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin-right: -4px;
+}

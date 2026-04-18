@@ -1,0 +1,165 @@
+# 推送 v* tag：构建 macOS DMG、Windows zip、源码 zip，并在 niugengyun/lan-transfer 创建 Release。
+# 需配置 PAT_TOKEN（与 veo3free 一致）。workflow_dispatch 可手动触发构建（无 tag 时 release 任务跳过）。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build SPA
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Icons and PyInstaller
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python create_icon.py
+          pyinstaller lan_transfer.spec --clean
+
+      - name: Create DMG
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "LAN Transfer" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "lan_transfer.app" 150 185 \
+            --app-drop-link 450 185 \
+            "lan-transfer-${TAG}-macos.dmg" \
+            "dist/lan_transfer.app"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: lan-transfer-${{ github.ref_name }}-macos.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build SPA
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Icons and PyInstaller
+        run: |
+          python create_icon.py
+          pyinstaller lan_transfer.spec --clean
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/lan_transfer.exe
+
+  package-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build SPA
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Zip source distribution
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p pkg/static
+          cp server.py version.py updater.py requirements.txt requirements-build.txt start.sh README.md AGENTS.md create_icon.py lan_transfer.spec pkg/
+          cp -r static/spa pkg/static/
+          cd pkg && zip -r "../lan-transfer-${TAG}-source.zip" .
+
+      - name: Upload source zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-zip
+          path: lan-transfer-${{ github.ref_name }}-source.zip
+
+  release:
+    needs: [build-macos, build-windows, package-source]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Zip Windows build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd windows-exe
+          zip -r "../lan-transfer-${TAG}-windows.zip" lan_transfer.exe
+
+      - name: Create Release on GitHub
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          owner: niugengyun
+          repo: lan-transfer
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          artifacts: "macos-dmg/lan-transfer-${{ github.ref_name }}-macos.dmg,lan-transfer-${{ github.ref_name }}-windows.zip,source-zip/lan-transfer-${{ github.ref_name }}-source.zip"
+          generateReleaseNotes: true
