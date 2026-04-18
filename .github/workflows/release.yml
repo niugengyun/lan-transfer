@@ -1,7 +1,10 @@
-# 推送 v* tag：构建 macOS DMG、Windows zip、源码 zip，并在 niugengyun/lan-transfer 创建 Release。
-# 需配置 PAT_TOKEN（与 veo3free 一致）。workflow_dispatch 可手动触发构建（无 tag 时 release 任务跳过）。
+# 推送 v* tag：构建 macOS DMG、Windows zip、源码 zip，并在当前仓库创建 Release。
+# 使用 GITHUB_TOKEN 发版（需在仓库 Settings → Actions → General 允许工作流写权限，或保留默认只读时为本 workflow 开启 contents: write）。
 
 name: Release
+
+permissions:
+  contents: write
 
 on:
   push:
@@ -150,7 +153,7 @@ jobs:
       - name: Create Release on GitHub
         uses: ncipollo/release-action@v1
         with:
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           owner: niugengyun
           repo: lan-transfer
           tag: ${{ github.ref_name }}
