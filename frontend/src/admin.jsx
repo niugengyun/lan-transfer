@@ -1,17 +1,25 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import {
   App as AntApp,
   Button,
   Card,
   ConfigProvider,
+  Modal,
   Space,
   Table,
   Typography,
   theme,
 } from "antd";
-import { CopyOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CopyOutlined } from "@ant-design/icons";
 import zhCN from "antd/locale/zh_CN";
+
+/** 弹窗标题居中 */
+const DIALOG_TITLE_CENTER = {
+  styles: {
+    header: { textAlign: "center" },
+  },
+};
 
 function AdminLanRow({ url, onCopy }) {
   if (!url) return null;
@@ -34,6 +42,9 @@ function AdminApp() {
   const [busy, setBusy] = useState(false);
   const [serverInfo, setServerInfo] = useState(null);
   const [appVersion, setAppVersion] = useState("");
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const checkingUpdateRef = useRef(false);
 
   const fetchServerInfo = useCallback(async () => {
     try {
@@ -59,6 +70,31 @@ function AdminApp() {
       setDevices([]);
     }
   }, []);
+
+  const checkForUpdate = useCallback(async () => {
+    if (checkingUpdateRef.current) return;
+    checkingUpdateRef.current = true;
+    try {
+      const res = await fetch("/api/update/check");
+      if (!res.ok) return;
+      const result = await res.json();
+      setUpdateInfo(result);
+      if (result.success && result.has_update) {
+        setUpdateModalOpen(true);
+      }
+    } catch {
+      /* 静默失败 */
+    } finally {
+      checkingUpdateRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      checkForUpdate();
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [checkForUpdate]);
 
   useEffect(() => {
     fetchServerInfo();
@@ -200,6 +236,7 @@ function AdminApp() {
       <Typography.Paragraph type="secondary">
         仅当通过本机回环地址（127.0.0.1）访问时可用。可查看当前在线 WebSocket
         连接；「清除所有聊天记录」会同时删除 uploads 下全部已上传文件；亦可仅清除全部上传文件。
+        桌面端程序有新版本时，将在本页自动弹出提示；请点击「前往下载」在系统默认浏览器中打开发布页或安装包链接。
       </Typography.Paragraph>
 
       <Card title="局域网用户端地址" style={{ marginBottom: 16 }}>
@@ -244,6 +281,74 @@ function AdminApp() {
           </Button>
         </Space>
       </Card>
+
+      <Modal
+        title="发现新版本"
+        open={updateModalOpen}
+        onCancel={() => setUpdateModalOpen(false)}
+        maskClosable={false}
+        destroyOnClose
+        footer={
+          <Space>
+            <Button onClick={() => setUpdateModalOpen(false)}>稍后提醒</Button>
+            <Button
+              type="primary"
+              icon={<CloudDownloadOutlined />}
+              onClick={async () => {
+                const u = updateInfo?.download_url || updateInfo?.release_url;
+                if (!u) {
+                  message.warning("没有可用的下载链接");
+                  return;
+                }
+                try {
+                  const r = await fetch("/api/admin/open-browser", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: u }),
+                  });
+                  const j = await r.json().catch(() => ({}));
+                  if (!r.ok) {
+                    const d = j.detail;
+                    message.error(typeof d === "string" ? d : `打开失败 (${r.status})`);
+                    return;
+                  }
+                  setUpdateModalOpen(false);
+                } catch {
+                  message.error("请求失败");
+                }
+              }}
+            >
+              前往下载
+            </Button>
+          </Space>
+        }
+        width={Math.min(440, typeof window !== "undefined" ? window.innerWidth - 48 : 400)}
+        {...DIALOG_TITLE_CENTER}
+      >
+        {updateInfo?.success ? (
+          <>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+              检测到有新版本发布。请点击「前往下载」，将在系统默认浏览器中打开下载地址或 Release 页面，下载安装包后覆盖安装桌面端。
+            </Typography.Paragraph>
+            {updateInfo.release_notes ? (
+              <div
+                style={{
+                  maxHeight: 220,
+                  overflowY: "auto",
+                  padding: 10,
+                  borderRadius: 8,
+                  background: token.colorFillTertiary,
+                  marginBottom: 8,
+                }}
+              >
+                <Typography.Text style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{updateInfo.release_notes}</Typography.Text>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <Typography.Text type="secondary">无法连接 GitHub 获取更新信息。</Typography.Text>
+        )}
+      </Modal>
     </div>
   );
 }

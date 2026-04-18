@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -736,8 +737,9 @@ def api_app_version() -> dict[str, str]:
 
 
 @app.get("/api/update/check")
-def api_update_check() -> dict[str, Any]:
-    """检查 GitHub 上 niugengyun/lan-transfer 最新 Release（与 veo3free 前端字段一致）。"""
+def api_update_check(request: Request) -> dict[str, Any]:
+    """检查 GitHub 最新 Release（仅本机可调；供控制台检测桌面端升级，避免局域网用户端重复请求）。"""
+    require_localhost(request)
     from updater import check_for_updates
 
     info = check_for_updates()
@@ -960,6 +962,29 @@ def admin_server_info(request: Request) -> dict[str, Any]:
     }
 
 
+@app.post("/api/admin/open-browser")
+async def admin_open_browser(request: Request) -> dict[str, bool]:
+    """在系统默认浏览器中打开 URL（仅本机；供控制台升级弹窗「前往下载」）。"""
+    require_localhost(request)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="需要 JSON 请求体")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="无效的请求体")
+    url = str(data.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 url")
+    parts = urlparse(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise HTTPException(status_code=400, detail="仅允许 http(s) 链接")
+    from updater import open_download_page
+
+    if not open_download_page(url):
+        raise HTTPException(status_code=500, detail="无法在系统浏览器中打开链接")
+    return {"ok": True}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     qp = websocket.query_params
@@ -1096,6 +1121,15 @@ def site_icon_png() -> FileResponse:
     if not p.is_file():
         raise HTTPException(status_code=404, detail="未找到 static/icon.png")
     return FileResponse(p, media_type="image/png")
+
+
+@app.get("/static/notification.mp3")
+def site_notification_mp3() -> FileResponse:
+    """新消息提示音（static/notification.mp3）。"""
+    p = STATIC_DIR / "notification.mp3"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="未找到 static/notification.mp3")
+    return FileResponse(p, media_type="audio/mpeg")
 
 
 @app.get("/")

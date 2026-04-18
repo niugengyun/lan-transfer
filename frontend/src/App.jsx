@@ -15,7 +15,6 @@ import {
 } from "antd";
 import {
   ArrowLeftOutlined,
-  CloudDownloadOutlined,
   EditOutlined,
   FileOutlined,
   FolderOpenOutlined,
@@ -289,6 +288,11 @@ export default function App() {
     clientIdRef.current = clientId;
   }, [clientId]);
 
+  const nickRef = useRef(nick);
+  useLayoutEffect(() => {
+    nickRef.current = nick;
+  }, [nick]);
+
   const [devices, setDevices] = useState([]);
   /** 当前 HTTP 服务所在机器的内网 IPv4（与 /api/lan-host 一致，全站只展示此地址） */
   const [serverLanIp, setServerLanIp] = useState("");
@@ -304,6 +308,10 @@ export default function App() {
   const [files, setFiles] = useState([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [input, setInput] = useState("");
+  const inputValueRef = useRef("");
+  useLayoutEffect(() => {
+    inputValueRef.current = input;
+  }, [input]);
   const [uploading, setUploading] = useState(false);
   /** 图片/视频点击放大：{ kind, stored, name } */
   const [mediaPreview, setMediaPreview] = useState(null);
@@ -313,18 +321,88 @@ export default function App() {
   const [unreadByChat, setUnreadByChat] = useState({});
   /** 电脑端：聊天区「用户列表」弹窗 */
   const [lanUsersModalOpen, setLanUsersModalOpen] = useState(false);
-  /** 在线升级：仅启动后由前端静默请求服务端 /api/update/check；不在界面提供手动检查按钮 */
-  const [updateInfo, setUpdateInfo] = useState(null);
-  const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
   const wsRef = useRef(null);
   const selectedChatRef = useRef(selectedChatId);
   const mobileChatOpenRef = useRef(mobileChatOpen);
   const isMobileRef = useRef(isMobile);
   const reconnectRef = useRef(null);
+  const sendInFlightRef = useRef(false);
   /** 仅右侧聊天消息区滚动，禁止 scrollIntoView（会滚动祖先导致底栏被顶出视口） */
   const chatScrollRef = useRef(null);
   const fileInputRef = useRef(null);
+  /** 新消息提示音（与 static/notification.mp3 对应） */
+  const notificationAudioRef = useRef(null);
+  /** 是否已通过用户手势完成静音 play（否则 WebSocket 里 play 会被桌面 Chrome 拦截） */
+  const notificationUnlockedRef = useRef(false);
+  const notificationUnlockInFlightRef = useRef(false);
+
+  const unlockNotificationAudioIfNeeded = useCallback(async () => {
+    if (notificationUnlockedRef.current) return;
+    if (notificationUnlockInFlightRef.current) return;
+    notificationUnlockInFlightRef.current = true;
+    try {
+      if (typeof Audio === "undefined") return;
+      if (!notificationAudioRef.current) {
+        notificationAudioRef.current = new Audio("/static/notification.mp3");
+        notificationAudioRef.current.preload = "auto";
+      }
+      const aud = notificationAudioRef.current;
+      aud.muted = true;
+      await aud.play();
+      aud.pause();
+      aud.currentTime = 0;
+      aud.muted = false;
+      aud.volume = 1;
+      notificationUnlockedRef.current = true;
+    } catch {
+      try {
+        if (notificationAudioRef.current) notificationAudioRef.current.muted = false;
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      notificationUnlockInFlightRef.current = false;
+    }
+  }, []);
+
+  const playNewMessageNotification = useCallback(() => {
+    try {
+      if (typeof Audio === "undefined") return;
+      if (!notificationAudioRef.current) {
+        notificationAudioRef.current = new Audio("/static/notification.mp3");
+        notificationAudioRef.current.preload = "auto";
+      }
+      const a = notificationAudioRef.current;
+      a.muted = false;
+      a.volume = 1;
+      a.currentTime = 0;
+      void a.play().catch(() => {});
+    } catch {
+      /* 忽略 */
+    }
+  }, []);
+
+  /**
+   * WebSocket 回调里 play() 无用户手势时桌面 Chrome 常拦截；手机触摸易触发解锁。
+   * document 上捕获 mousedown/click/keydown/pointerdown，并在发送消息前 await 静音解锁。
+   */
+  useEffect(() => {
+    const onGesture = () => {
+      void unlockNotificationAudioIfNeeded();
+    };
+    const opts = { capture: true, passive: true };
+    document.addEventListener("pointerdown", onGesture, opts);
+    document.addEventListener("mousedown", onGesture, opts);
+    document.addEventListener("click", onGesture, opts);
+    document.addEventListener("keydown", onGesture, opts);
+    return () => {
+      document.removeEventListener("pointerdown", onGesture, opts);
+      document.removeEventListener("mousedown", onGesture, opts);
+      document.removeEventListener("click", onGesture, opts);
+      document.removeEventListener("keydown", onGesture, opts);
+    };
+  }, [unlockNotificationAudioIfNeeded]);
 
   const scrollBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -373,24 +451,6 @@ export default function App() {
       return list;
     } catch {
       return null;
-    }
-  }, []);
-
-  const checkingUpdateRef = useRef(false);
-  const checkForUpdateSilent = useCallback(async () => {
-    if (checkingUpdateRef.current) return;
-    checkingUpdateRef.current = true;
-    try {
-      const res = await fetch("/api/update/check");
-      const result = await res.json();
-      setUpdateInfo(result);
-      if (result.success && result.has_update) {
-        setUpdateModalOpen(true);
-      }
-    } catch {
-      /* 静默失败 */
-    } finally {
-      checkingUpdateRef.current = false;
     }
   }, []);
 
@@ -508,6 +568,7 @@ export default function App() {
             ts: data.ts,
           });
           bumpUnreadIfNeeded(GROUP_ID, mine);
+          if (!mine) playNewMessageNotification();
           return;
         }
         const peer = dmPeerId(data, me());
@@ -522,6 +583,7 @@ export default function App() {
           ts: data.ts,
         });
         bumpUnreadIfNeeded(peer, mine);
+        if (!mine) playNewMessageNotification();
         return;
       }
       if (data.type === "file") {
@@ -538,6 +600,7 @@ export default function App() {
             mine,
           });
           bumpUnreadIfNeeded(GROUP_ID, mine);
+          if (!mine) playNewMessageNotification();
           loadFiles();
           return;
         }
@@ -555,6 +618,7 @@ export default function App() {
             mine,
           });
           bumpUnreadIfNeeded(peer, mine);
+          if (!mine) playNewMessageNotification();
         }
         loadFiles();
         return;
@@ -564,7 +628,7 @@ export default function App() {
         return;
       }
     };
-  }, [nick, appendToThread, loadFiles, message, fetchOnline]);
+  }, [nick, appendToThread, loadFiles, message, fetchOnline, playNewMessageNotification]);
 
   useEffect(() => {
     connectWs();
@@ -593,13 +657,6 @@ export default function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      checkForUpdateSilent();
-    }, 3000);
-    return () => clearTimeout(t);
-  }, [checkForUpdateSilent]);
 
   useEffect(() => {
     localStorage.setItem(NICK_KEY, nick);
@@ -884,22 +941,46 @@ export default function App() {
     });
   }, [selectedChatId, currentRows.length, mobileChatOpen]);
 
-  const sendText = () => {
-    const body = input.trim();
-    if (!body) return;
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      message.warning("未连接到服务器");
-      return;
+  const sendText = useCallback(async () => {
+    const body = inputValueRef.current.trim();
+    if (!body || sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    try {
+      await unlockNotificationAudioIfNeeded();
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const ws = wsRef.current;
+        if (!ws) {
+          message.warning("未连接到服务器");
+          return;
+        }
+        if (ws.readyState === WebSocket.OPEN) {
+          const n = (nickRef.current || "").trim() || "匿名";
+          const sid = selectedChatRef.current;
+          const group = sid === GROUP_ID;
+          const payload = group
+            ? JSON.stringify({ type: "text", from: n, body, scope: "group" })
+            : JSON.stringify({ type: "text", from: n, body, to_client_id: sid });
+          try {
+            ws.send(payload);
+          } catch {
+            message.warning("发送失败，请稍后再试");
+            return;
+          }
+          setInput((prev) => (prev.trim() === body ? "" : prev));
+          return;
+        }
+        if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+          message.warning("未连接到服务器");
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      message.warning("连接超时，请稍后再试");
+    } finally {
+      sendInFlightRef.current = false;
     }
-    const n = (nick || "").trim() || "匿名";
-    if (isGroup) {
-      ws.send(JSON.stringify({ type: "text", from: n, body, scope: "group" }));
-    } else {
-      ws.send(JSON.stringify({ type: "text", from: n, body, to_client_id: selectedChatId }));
-    }
-    setInput("");
-  };
+  }, [message, unlockNotificationAudioIfNeeded]);
 
   const onPickFiles = async (list) => {
     if (!list?.length) return;
@@ -1546,23 +1627,6 @@ export default function App() {
                 </span>
               </div>
             </header>
-            {updateInfo?.success && updateInfo?.has_update ? (
-              <div
-                style={{
-                  flexShrink: 0,
-                  padding: "4px 12px 10px",
-                  background: listBg,
-                  borderBottom: `1px solid ${borderLine}`,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <Typography.Text type="warning" strong style={{ fontSize: 12 }}>
-                  有新版本可用
-                </Typography.Text>
-              </div>
-            ) : null}
             </>
           )}
           {isMobile && (
@@ -1576,65 +1640,62 @@ export default function App() {
             >
               <div
                 style={{
-                  display: "flex",
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto 1fr",
                   alignItems: "center",
-                  gap: 8,
-                  flexWrap: "nowrap",
+                  columnGap: 8,
                 }}
               >
-                <Typography.Text strong style={{ fontSize: 18, color: token.colorTextHeading, flexShrink: 0 }}>
+                <div style={{ minWidth: 0 }} aria-hidden />
+                <Typography.Text
+                  strong
+                  style={{
+                    fontSize: 18,
+                    color: token.colorTextHeading,
+                    flexShrink: 0,
+                    textAlign: "center",
+                    justifySelf: "center",
+                  }}
+                >
                   快传
                 </Typography.Text>
-                <div style={{ flex: 1, minWidth: 8 }} />
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={openNickModal}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openNickModal();
-                    }
-                  }}
-                  title="点击修改昵称"
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 5,
-                    maxWidth: 140,
-                    minWidth: 0,
-                    flexShrink: 1,
-                    cursor: "pointer",
-                  }}
-                >
-                  <Typography.Text
-                    strong
-                    ellipsis
+                <div style={{ display: "flex", justifyContent: "flex-end", minWidth: 0 }}>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={openNickModal}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openNickModal();
+                      }
+                    }}
+                    title="点击修改昵称"
                     style={{
-                      fontSize: 15,
-                      color: token.colorText,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      maxWidth: 140,
                       minWidth: 0,
-                      lineHeight: 1.35,
+                      cursor: "pointer",
                     }}
                   >
-                    {(nick || "").trim() || "匿名"}
-                  </Typography.Text>
-                  <EditOutlined style={{ fontSize: 14, color: token.colorTextSecondary, flexShrink: 0 }} aria-hidden />
-                </span>
-              </div>
-              {updateInfo?.success && updateInfo?.has_update ? (
-                <div
-                  style={{
-                    marginTop: 6,
-                    display: "flex",
-                    alignItems: "center",
-                  }}
-                >
-                  <Typography.Text type="warning" strong style={{ fontSize: 11 }}>
-                    有新版本可用
-                  </Typography.Text>
+                    <Typography.Text
+                      strong
+                      ellipsis
+                      style={{
+                        fontSize: 15,
+                        color: token.colorText,
+                        minWidth: 0,
+                        lineHeight: 1.35,
+                      }}
+                    >
+                      {(nick || "").trim() || "匿名"}
+                    </Typography.Text>
+                    <EditOutlined style={{ fontSize: 14, color: token.colorTextSecondary, flexShrink: 0 }} aria-hidden />
+                  </span>
                 </div>
-              ) : null}
+              </div>
             </div>
           )}
           <div
@@ -1841,9 +1902,10 @@ export default function App() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  minHeight: 44,
+                  minHeight: 40,
                   paddingLeft: 2,
                   paddingRight: 6,
+                  paddingBottom: 0,
                 }}
               >
                 <Button
@@ -1904,17 +1966,6 @@ export default function App() {
                   ) : null}
                 </Space>
               </div>
-              <div style={{ padding: "0 12px 8px", textAlign: "center" }}>
-                {isGroup ? (
-                  <Typography.Text type="secondary" style={{ fontSize: 12, color: WX_META, lineHeight: 1.45 }}>
-                    在线 {devices.length} 人
-                  </Typography.Text>
-                ) : (
-                  <Typography.Text type="secondary" style={{ fontSize: 12, color: WX_META, lineHeight: 1.45 }}>
-                    {(selectedDevice?.ip || "").trim() || "—"}
-                  </Typography.Text>
-                )}
-              </div>
             </div>
           )}
 
@@ -1973,7 +2024,7 @@ export default function App() {
                         textAlign: "center",
                       }}
                     >
-                      群组 · 广播给所有人
+                      群组广播
                     </Typography.Text>
                   </div>
                   <Space size={0} wrap={false} style={{ flexShrink: 0, alignItems: "center", position: "relative", zIndex: 1 }}>
@@ -2186,7 +2237,7 @@ export default function App() {
                   onPressEnter={(e) => {
                     if (!e.shiftKey) {
                       e.preventDefault();
-                      sendText();
+                      void sendText();
                     }
                   }}
                   placeholder={isGroup ? "群发消息给所有人…" : "私聊消息…"}
@@ -2204,7 +2255,7 @@ export default function App() {
               <Button
                 type="text"
                 onClick={() => {
-                  if (input.trim()) sendText();
+                  if (input.trim()) void sendText();
                 }}
                 style={{
                   flexShrink: 0,
@@ -2360,55 +2411,6 @@ export default function App() {
             </Typography.Paragraph>
             <Typography.Text type="secondary">大小：{fmtSize(mediaPreview.size ?? 0)}</Typography.Text>
           </div>
-        )}
-      </Modal>
-
-      <Modal
-        title="发现新版本"
-        open={updateModalOpen}
-        onCancel={() => setUpdateModalOpen(false)}
-        destroyOnClose
-        footer={
-          <Space>
-            <Button onClick={() => setUpdateModalOpen(false)}>稍后提醒</Button>
-            <Button
-              type="primary"
-              icon={<CloudDownloadOutlined />}
-              onClick={() => {
-                const u = updateInfo?.download_url || updateInfo?.release_url;
-                if (u) window.open(u, "_blank", "noopener,noreferrer");
-                setUpdateModalOpen(false);
-              }}
-            >
-              前往下载
-            </Button>
-          </Space>
-        }
-        width={Math.min(440, typeof window !== "undefined" ? window.innerWidth - 48 : 400)}
-        {...DIALOG_TITLE_CENTER}
-      >
-        {updateInfo?.success ? (
-          <>
-            <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-              检测到有新版本发布，请前往下载页面获取安装包。
-            </Typography.Paragraph>
-            {updateInfo.release_notes ? (
-              <div
-                style={{
-                  maxHeight: 220,
-                  overflowY: "auto",
-                  padding: 10,
-                  borderRadius: 8,
-                  background: token.colorFillTertiary,
-                  marginBottom: 8,
-                }}
-              >
-                <Typography.Text style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{updateInfo.release_notes}</Typography.Text>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <Typography.Text type="secondary">无法连接 GitHub 获取更新信息。</Typography.Text>
         )}
       </Modal>
 

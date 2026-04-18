@@ -78,7 +78,7 @@ pyinstaller lan_transfer.spec --clean
 ## 在线升级（与 veo3free 前端行为对齐）
 
 - **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；**macOS** 优先 `*macos*.dmg` / `*macos*.zip`，**Windows** 优先 `*windows*.zip` / `.exe`，否则回退含 `lan-transfer` 的 `.zip` 如源码包）。
-- **接口**：`GET /api/app/version`、`GET /api/update/check`（返回字段与 veo3free 的 `check_update` 字典一致：`success`、`has_update`、`current_version`、`latest_version`、`release_notes`、`download_url`、`release_url`）。
-- **前端**：启动约 **3 秒**后静默请求 `GET /api/update/check`（由服务端访问 GitHub）；侧栏显示版本号，有新版本时附带简短提示；有新版本时弹窗「发现新版本」（说明 + 前往下载）。**不提供**「检查更新」按钮。
+- **接口**：`GET /api/app/version`（任意客户端可读当前版本）；`GET /api/update/check` **仅本机（127.0.0.1）** 可调（返回字段与 veo3free 的 `check_update` 字典一致：`success`、`has_update`、`current_version`、`latest_version`、`release_notes`、`download_url`、`release_url`）；由服务端访问 GitHub。
+- **控制台 `/admin`**：启动约 **3 秒**后静默请求 `GET /api/update/check`；有新版本时弹窗「发现新版本」，「前往下载」经 `POST /api/admin/open-browser` 在系统默认浏览器中打开链接。局域网 **Web 聊天页** 不请求更新、不弹升级窗。
 - **开发跳过检查**：环境变量 **`LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
 
