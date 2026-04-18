@@ -19,6 +19,10 @@ _icon_png = _ROOT / "static" / "icon.png"
 if _icon_png.is_file():
     _datas.append((str(_icon_png), "static"))
 
+_notification_mp3 = _ROOT / "static" / "notification.mp3"
+if _notification_mp3.is_file():
+    _datas.append((str(_notification_mp3), "static"))
+
 _icons_dir = _ROOT / "icons"
 if _icons_dir.is_dir():
     _datas.append((str(_icons_dir), "icons"))
@@ -68,30 +72,60 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    name="lan_transfer",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=str(_ROOT / "icons" / "app_icon.ico"),
-)
-
+# macOS：onefile 式 EXE 会先起 bootloader 再 exec 子进程，Dock 常出现两个图标；改为 onedir（COLLECT + BUNDLE）单进程启动。
+# Windows：保持单文件 exe，便于分发。
 if sys.platform == "darwin":
-    app = BUNDLE(
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="lan_transfer",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(_ROOT / "icons" / "app_icon.icns"),
+    )
+    coll = COLLECT(
         exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name="lan_transfer",
+    )
+    app = BUNDLE(
+        coll,
         name="lan_transfer.app",
         icon=str(_ROOT / "icons" / "app_icon.icns"),
         bundle_identifier="com.niugengyun.lantransfer",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        name="lan_transfer",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(_ROOT / "icons" / "app_icon.ico"),
     )
