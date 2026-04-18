@@ -59,6 +59,7 @@ pyinstaller lan_transfer.spec --clean
 ## 改代码时注意
 
 - **不要无故改依赖版本**（用户约定）。
+- `**static/notification.mp3`**：新消息提示音由用户自行维护并已手动替换；**后续不要覆盖、重新生成或修改该文件**（除非用户明确要求）。
 - **聊天 UI、滚动、底栏**：逻辑集中在 `frontend/src/App.jsx`；消息区滚动用 `**chatScrollRef`** 设 `scrollTop`，**不要用 `scrollIntoView`**（会破坏固定底栏布局）。
 - **后端路由**：上传/下载/内联预览在 `server.py`；管理接口带本机校验。
 - **文档**：用户未要求不要新建大段 Markdown；本文件用于协作说明。
@@ -71,9 +72,9 @@ pyinstaller lan_transfer.spec --clean
 
 与 veo3free 那种「先在私有仓开发、再镜像到公有仓并发 Release」不同：若你**只在公有仓 `niugengyun/lan-transfer` 上开发并推送**，只需 `**release.yml`**，不必再保留「私有 → 公有」的同步工作流（原 `push-public.yml` 已移除：它只在「代码在别的仓库、要自动推到公有 `main`」时才有用）。
 
-- `**.github/workflows/release.yml`**：推送 `**v***` tag（或 `**workflow_dispatch**` 仅构建产物）时：在 **macOS** 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 **create-dmg** 生成 `**lan-transfer-<tag>-macos.dmg`**；在 Windows 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip**`。**仅 tag 推送**时 `**release`** 任务将上述两个文件发到 **当前仓库** 的 Release（使用 `**GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
+- `**.github/workflows/release.yml`**：推送 `**v*`** tag（或 `**workflow_dispatch**` 仅构建产物）时：在 macOS 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 create-dmg 生成 `**lan-transfer-<tag>-macos.dmg**`；在 Windows 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip`**。**仅 tag 推送**时 `**release`** 任务将上述两个文件发到 **当前仓库** 的 Release（使用 `**GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
 
-发版前把 `**version.py`** 里的 `**__version__**` 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
+发版前把 `**version.py`** 里的 `**__version__`** 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
 
 ## 在线升级（与 veo3free 前端行为对齐）
 
