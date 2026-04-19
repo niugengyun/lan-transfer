@@ -21,8 +21,8 @@
 
 ## 技术栈
 
-- **后端**：Python 3、FastAPI、Uvicorn、WebSocket；本机默认 **pywebview** 管理壳  
-- **前端**：Vite 5、React 18、Ant Design 5  
+- **后端**：**Python 3.9+**（推荐 **3.11 / 3.12**）、FastAPI、Uvicorn、WebSocket；本机默认 **pywebview** 管理壳（版本见 `requirements.txt`）  
+- **前端**：**Node.js 18+**（推荐 **20 LTS**）、Vite 5、React 18、Ant Design 5（版本见 `frontend/package.json`）  
 - **构建产物**：输出到 `static/spa/`，由 `server.py` 提供 `/` 与静态资源
 
 ---
@@ -32,7 +32,8 @@
 ```
 ├── server.py           # 主服务：HTTP / WS / 静态页 / 上传与聊天逻辑
 ├── requirements.txt    # Python 依赖
-├── start.sh            # 可选：创建 .venv、安装依赖并启动 server.py
+├── start.sh            # 可选（macOS/Linux）：创建 .venv、安装依赖并启动 server.py
+├── start.bat           # 可选（Windows）：同上，与 start.sh 行为对齐
 ├── frontend/           # 前端源码（Vite + React）
 ├── static/spa/         # 前端构建输出（部署前需 npm run build）
 ├── uploads/            # 用户上传文件（默认不入库，见 .gitignore）
@@ -43,8 +44,29 @@
 
 ## 环境要求
 
-- Python **3.9+**（推荐与本地已验证版本一致）  
-- Node.js **18+**（仅在前端需要重新构建时）
+### Python
+
+
+| 说明       | 版本                                                                                                        |
+| -------- | --------------------------------------------------------------------------------------------------------- |
+| **最低**   | **3.9**（请勿再低，以免与依赖的 `python_requires` 冲突）                                                                 |
+| **推荐**   | **3.11** 或 **3.12**（开发与打包建议与之一致）                                                                          |
+| **依赖锁定** | 见根目录 `requirements.txt`（当前示例：`fastapi==0.115.6`、`uvicorn[standard]==0.32.1`、`python-multipart==0.0.17` 等） |
+
+
+仅打安装包时另需 `requirements-build.txt`（PyInstaller），Python 版本与上表相同即可。
+
+### Node.js
+
+
+| 说明       | 版本                                                                             |
+| -------- | ------------------------------------------------------------------------------ |
+| **最低**   | **18.0**（Vite 5、`@vitejs/plugin-react` 的基线要求）                                  |
+| **推荐**   | **20.x** 或 **22.x** 的 **LTS** 发行版（执行 `npm ci` / `npm install`、`npm run build`） |
+| **依赖范围** | 见 `frontend/package.json`（当前示例：`vite ^5.4.x`、`react ^18.3.x`、`antd ^5.22.x`）   |
+
+
+Node 仅在前端**开发**或**重新构建** `static/spa/` 时需要；只运行已构建的静态页时不必安装 Node。
 
 ---
 
@@ -60,10 +82,20 @@ pip install -r requirements.txt
 
 或使用项目脚本（自动创建 `.venv` 并安装依赖）：
 
+**macOS / Linux：**
+
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
+
+**Windows（在资源管理器中双击，或在「命令提示符 / PowerShell」中执行）：**
+
+```bat
+start.bat
+```
+
+需已安装 **Python**（`python` 或 `py -3` 可用）与 **Node.js**（`npm` 在 PATH 中）。
 
 ### 2. 构建前端（首次或修改 `frontend/` 后）
 
@@ -85,7 +117,7 @@ python server.py
 默认行为（本机图形环境可用时）：
 
 - 在**后台线程**启动 FastAPI / Uvicorn（仍监听 `HOST`，一般为 `0.0.0.0`，局域网可访问聊天页）。
-- 在主线程用 **pywebview** 打开 `**http://127.0.0.1:端口/admin/`** 作为「壳子窗口」，即本机管理页；关闭该窗口后进程结束。
+- 在主线程用 **pywebview** 打开 `http://127.0.0.1:端口/admin/` 作为「壳子窗口」，即本机管理页；关闭该窗口后进程结束。
 
 若不需要桌面窗口（SSH、无显示器服务器、或不想装 pywebview 图形依赖），可任选其一：
 
@@ -97,7 +129,7 @@ python server.py --no-webview
 
 此时仅控制台运行 Web 服务，与旧版行为一致。
 
-终端会打印本机访问地址与检测到的**局域网 IP**；同网段设备使用 `http://<你的局域网IP>:8888` 访问主站（默认端口 **8888**）。若需改端口，请设置环境变量 `**PORT`** 后重新启动程序。
+终端会打印本机访问地址与检测到的**局域网 IP**；同网段设备使用 `http://<你的局域网IP>:8888` 访问主站（默认端口 **8888**）。若需改端口，请设置环境变量 `PORT` 后重新启动程序。
 
 ### 环境变量（可选）
 
@@ -128,7 +160,7 @@ PORT=9000 python server.py
 - `GET /api/suggest-nick` — 根据 UA 建议默认昵称  
 - `WebSocket /ws` — 实时消息与在线状态
 
-管理类接口（如清空上传、清空聊天记录）在 `**/admin` 管理端页面** 中调用，且服务端会校验**仅本机**可访问相关路由。
+管理类接口（如清空上传、清空聊天记录）在 `/admin` 管理端页面中调用，且服务端会校验**仅本机**可访问相关路由。
 
 ---
 

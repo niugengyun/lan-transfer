@@ -15,7 +15,7 @@
 | ---- | ---------------------------------------------------------------------------------------- |
 | 后端   | `server.py` — FastAPI、Uvicorn、WebSocket、`static/spa` 托管、`uploads/` 存文件                   |
 | 前端源码 | `frontend/` — Vite 5 + React 18 + Ant Design 5，入口 `src/App.jsx`（主站）、`src/admin.jsx`（管理端） |
-| 构建产物 | `frontend` 执行 `npm run build` → 输出到 `**static/spa/`**（主站 `index.html`、管理端 `admin.html`）  |
+| 构建产物 | 在 `frontend` 执行 `npm run build` → 输出到 `static/spa/`（主站 `index.html`、管理端 `admin.html`）    |
 
 
 ## 目录速览
@@ -27,9 +27,11 @@ requirements-build.txt # 仅打包：PyInstaller（Pillow 已在 requirements.tx
 lan_transfer.spec      # PyInstaller 配置（datas 打入 static/spa、图标等）
 create_icon.py         # 按品牌四宫格矢量逻辑绘制并生成 icons/app_icon.ico（及 macOS 下 app_icon.icns）
 icons/                 # 构建产物图标（app_icon.* 已 .gitignore，勿强依赖提交）
-start.sh               # 创建 .venv、清华 pip 源、npm 镜像、装依赖、exec python server.py
+start.sh               # macOS/Linux：创建 .venv、清华 pip 源、npm 镜像、装依赖、启动 server.py
+start.bat              # Windows：与 start.sh 等价（.venv、pip/npm 镜像、npm install、启动 server.py）
 frontend/              # 前端源码
 static/spa/            # 构建后的 SPA（需 build 后才有完整页面）
+static/notification.mp3 # 新消息提示音（用户自行维护；勿擅自覆盖或重新生成，见下文）
 static/icon.png        # 可选；仅用于站点路径 /static/icon.png（与打包图标脚本无关）
 uploads/               # 用户上传（.gitignore）；打包后实际在 ~/Documents/lan-transfer/uploads/
 data/                  # 聊天记录等（.gitignore）；打包后在 ~/Documents/lan-transfer/data/
@@ -38,16 +40,21 @@ README.md              # 给人看的说明
 
 ## 常用命令
 
+**macOS / Linux**
+
 ```bash
 # Python（建议虚拟环境）
 pip install -r requirements.txt
 python server.py                    # 默认可能带 WebView 打开 /admin
 NO_WEBVIEW=1 python server.py       # 仅控制台服务
 
+# 一键（含 venv、依赖、可选图标与 npm）
+chmod +x start.sh && ./start.sh
+
 # 前端改完需构建（主站与管理端一起）
 cd frontend && npm install && npm run build
 
-# 桌面可执行文件（参考 veo3free-main：先 SPA，再图标，再 PyInstaller）
+# 桌面可执行文件（先 SPA，再图标，再 PyInstaller）
 pip install -r requirements.txt -r requirements-build.txt
 cd frontend && npm ci && npm run build && cd ..
 python create_icon.py
@@ -56,22 +63,30 @@ pyinstaller lan_transfer.spec --clean
 # 冻结后静态资源来自打包内只读目录；上传与 data 写入 ~/Documents/lan-transfer/
 ```
 
+**Windows（命令提示符）**
+
+```bat
+start.bat
+```
+
+`start.bat` 会创建 `.venv`、安装依赖与前端 `npm install`，最后执行 `python server.py`。若只要控制台、不要 WebView，可在同一终端先执行 `set NO_WEBVIEW=1` 再运行 `call .venv\Scripts\activate.bat` 与 `python server.py`（或自行改 `start.bat` 末尾）。
+
 ## 改代码时注意
 
 - **不要无故改依赖版本**（用户约定）。
-- `**static/notification.mp3`**：新消息提示音由用户自行维护并已手动替换；**后续不要覆盖、重新生成或修改该文件**（除非用户明确要求）。
-- **聊天 UI、滚动、底栏**：逻辑集中在 `frontend/src/App.jsx`；消息区滚动用 `**chatScrollRef`** 设 `scrollTop`，**不要用 `scrollIntoView`**（会破坏固定底栏布局）。
+- `**static/notification.mp3`**：新消息提示音由用户自行维护；**不要覆盖、重新生成或修改该文件**（除非用户明确要求）。
+- **聊天 UI、滚动、底栏**：逻辑集中在 `frontend/src/App.jsx`；消息区滚动用 `chatScrollRef` 设 `scrollTop`，**不要用 `scrollIntoView`**（会破坏固定底栏布局）。
 - **后端路由**：上传/下载/内联预览在 `server.py`；管理接口带本机校验。
 - **文档**：用户未要求不要新建大段 Markdown；本文件用于协作说明。
 
 ## 变更备忘（近期，便于对照）
 
-以下为用户与协作中已落实的改动摘要；**管理端若再改 `frontend/src/admin.jsx`，需在本机执行 `cd frontend && npm run build`** 才会更新 `static/spa/`（含 `admin.html` 引用的 `assets/admin-*.js`）。
+以下摘要便于对照；**改 `frontend/src/admin.jsx` 或主站 `App.jsx` 后**，需在 `frontend` 目录执行 `npm run build` 才会更新 `static/spa/`（含 `admin.html` / `index.html` 引用的 `assets/*.js`）。
 
-- **`start.sh`**：`LANG` 为空或为 `C`/`POSIX` 时默认 `en_US.UTF-8`；安装过程 `echo` 改为半角标点与 `...`，减轻非 UTF-8 终端下乱码。
-- **`server.py`**：上传自动清理的后台线程改为 **`lifespan`** 启动（不再使用已弃用的 `on_event("startup")`）；另有运行期**防系统休眠/关屏**逻辑（见代码 `_prevent_system_sleep_*`）。
-- **管理页 `frontend/src/admin.jsx` + `frontend/admin.html`**：已去掉「控制台」标题下整段灰色说明小字；已上传文件**预览弹窗**为减轻背后页面闪动：`html { scrollbar-gutter: stable; }`、预览 `Modal` 使用 `destroyOnClose={false}`、`centered`、关闭过渡动画、`img`/`video` 带 `key={stored}` 等。
-- **`static/notification.mp3`**：仍按上文约定由用户维护，勿擅自替换。
+- `**start.sh` / `start.bat`**：`start.sh` 在 `LANG` 为空或为 `C`/`POSIX` 时默认 `en_US.UTF-8`；安装提示使用半角标点。`start.bat` 使用 `chcp 65001` 减轻中文乱码。
+- `**server.py`**：上传自动清理后台线程通过 `**lifespan`** 启动（不再使用已弃用的 `on_event("startup")`）；运行期 防系统休眠/关屏（`_prevent_system_sleep_*`）；`/api/online` 的 `list_public()` 含 `**online**` 字段供管理端展示。
+- **管理页**：`frontend/admin.html` 用 `**#admin-app-scroll`** 包裹根节点、`body` 不滚动，减轻 Modal 打开时背后整页宽度跳变；在线用户表 **昵称 / 状态** 列顺序与状态配色；已上传文件预览与表格列宽等与弹窗相关的布局调整见 `frontend/src/admin.jsx`。
+- `**static/notification.mp3`**：用户维护，勿擅自替换。
 
 ## 安全与边界
 
@@ -79,16 +94,17 @@ pyinstaller lan_transfer.spec --clean
 
 ## GitHub 工作流
 
-与 veo3free 那种「先在私有仓开发、再镜像到公有仓并发 Release」不同：若你**只在公有仓 `niugengyun/lan-transfer` 上开发并推送**，只需 `**release.yml`**，不必再保留「私有 → 公有」的同步工作流（原 `push-public.yml` 已移除：它只在「代码在别的仓库、要自动推到公有 `main`」时才有用）。
+若**只在公有仓 `niugengyun/lan-transfer` 上开发并推送**，使用 `.github/workflows/release.yml` 即可。
 
-- `**.github/workflows/release.yml`**：推送 `**v*`** tag（或 `**workflow_dispatch**` 仅构建产物）时：在 macOS 上 `npm ci`、打包 SPA、`create_icon.py`、`pyinstaller lan_transfer.spec`，用 create-dmg 生成 `**lan-transfer-<tag>-macos.dmg**`；在 Windows 上同样流程生成 `**lan_transfer.exe`** 并打成 `**lan-transfer-<tag>-windows.zip`**。**仅 tag 推送**时 `**release`** 任务将上述两个文件发到 **当前仓库** 的 Release（使用 `**GITHUB_TOKEN`**，工作流已声明 `permissions: contents: write`；若组织策略限制默认 `GITHUB_TOKEN` 权限，需在仓库 **Settings → Actions → General** 将 *Workflow permissions* 设为可写入或使用 PAT）。
+- **触发**：推送 `v*` tag，或 `workflow_dispatch` 仅构建产物。
+- **产物**：macOS 上生成 `lan-transfer-<tag>-macos.dmg` 等；Windows 上生成 `lan_transfer.exe` 并打 zip。**仅 tag 推送**时 `release` 任务将文件发到当前仓库 Release（`GITHUB_TOKEN`；仓库需允许 workflow 写入 contents，见 Settings → Actions → General）。
 
-发版前把 `**version.py`** 里的 `**__version__`** 与 **Git tag** 对齐（与 veo3free 的 `version.py` 用法一致）。
+发版前将 `version.py` 的 `__version__` 与 Git **tag**（如 `v0.1.4`）对齐。
 
 ## 在线升级（与 veo3free 前端行为对齐）
 
-- **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；**macOS** 优先 `*macos*.dmg` / `*macos*.zip`，**Windows** 优先 `*windows*.zip` / `.exe`，否则回退含 `lan-transfer` 的 `.zip` 如源码包）。
-- **接口**：`GET /api/app/version`（任意客户端可读当前版本）；`GET /api/update/check` **仅本机（127.0.0.1）** 可调（返回字段与 veo3free 的 `check_update` 字典一致：`success`、`has_update`、`current_version`、`latest_version`、`release_notes`、`download_url`、`release_url`）；由服务端访问 GitHub。
-- **控制台 `/admin`**：启动约 **3 秒**后静默请求 `GET /api/update/check`；有新版本时弹窗「发现新版本」，「前往下载」经 `POST /api/admin/open-browser` 在系统默认浏览器中打开链接。局域网 **Web 聊天页** 不请求更新、不弹升级窗。
-- **开发跳过检查**：环境变量 `**LAN_TRANSFER_DEV=1`**（或当前版本为 `dev`）时服务端不请求 GitHub。
+- **后端**：`version.py`（`GITHUB_REPO = "niugengyun/lan-transfer"`）、`updater.py`（请求 `releases/latest`；macOS 优先 `*macos*.dmg` / `*macos*.zip`，Windows 优先 `*windows*.zip` / `.exe`）。
+- **接口**：`GET /api/app/version`；`GET /api/update/check` **仅本机 127.0.0.1**。
+- **控制台 `/admin`**：约 3 秒后静默检查更新；有新版本弹窗，「前往下载」走 `POST /api/admin/open-browser`。局域网 Web 聊天页不请求升级。
+- **开发跳过检查**：环境变量 `LAN_TRANSFER_DEV=1`（或版本为 `dev`）时不请求 GitHub。
 
