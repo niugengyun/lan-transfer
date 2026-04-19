@@ -64,6 +64,15 @@ pyinstaller lan_transfer.spec --clean
 - **后端路由**：上传/下载/内联预览在 `server.py`；管理接口带本机校验。
 - **文档**：用户未要求不要新建大段 Markdown；本文件用于协作说明。
 
+## 变更备忘（近期，便于对照）
+
+以下为用户与协作中已落实的改动摘要；**管理端若再改 `frontend/src/admin.jsx`，需在本机执行 `cd frontend && npm run build`** 才会更新 `static/spa/`（含 `admin.html` 引用的 `assets/admin-*.js`）。
+
+- **`start.sh`**：`LANG` 为空或为 `C`/`POSIX` 时默认 `en_US.UTF-8`；安装过程 `echo` 改为半角标点与 `...`，减轻非 UTF-8 终端下乱码。
+- **`server.py`**：上传自动清理的后台线程改为 **`lifespan`** 启动（不再使用已弃用的 `on_event("startup")`）；另有运行期**防系统休眠/关屏**逻辑（见代码 `_prevent_system_sleep_*`）。
+- **管理页 `frontend/src/admin.jsx` + `frontend/admin.html`**：已去掉「控制台」标题下整段灰色说明小字；已上传文件**预览弹窗**为减轻背后页面闪动：`html { scrollbar-gutter: stable; }`、预览 `Modal` 使用 `destroyOnClose={false}`、`centered`、关闭过渡动画、`img`/`video` 带 `key={stored}` 等。
+- **`static/notification.mp3`**：仍按上文约定由用户维护，勿擅自替换。
+
 ## 安全与边界
 
 面向 **可信局域网**；无完整鉴权。不要把服务裸暴露到公网。

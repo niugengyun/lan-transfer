@@ -8,9 +8,29 @@
     />
     <link rel="icon" type="image/png" href="/static/icon.png" />
     <title>控制台</title>
+    <!-- 主滚动条放在 #admin-app-scroll 内，body 不滚动，避免 Modal 锁滚动时整页 clientWidth 变化 -->
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        overflow: hidden;
+      }
+      #admin-app-scroll {
+        height: 100%;
+        overflow: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-gutter: stable;
+      }
+    </style>
   </head>
   <body>
-    <div id="admin-root"></div>
+    <div id="admin-app-scroll">
+      <div id="admin-root"></div>
+    </div>
     <script type="module" src="/src/admin.jsx"></script>
   </body>
 </html>

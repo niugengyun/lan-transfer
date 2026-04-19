@@ -338,6 +338,7 @@ function AdminApp() {
       {
         title: "文件",
         key: "preview",
+        width: 300,
         ellipsis: false,
         render: (_, row) => {
           const label = (row.display_name || row.stored_name || "—").toString();
@@ -454,12 +455,30 @@ function AdminApp() {
       {
         title: "存储名称",
         dataIndex: "stored_name",
-        ellipsis: true,
-        render: (t) => (
-          <Typography.Text code copyable={{ text: t }} style={{ fontSize: 12 }}>
-            {t}
-          </Typography.Text>
-        ),
+        width: 230,
+        onCell: () => ({
+          style: { maxWidth: 230, overflow: "hidden", verticalAlign: "middle" },
+        }),
+        render: (t) => {
+          const s = typeof t === "string" ? t : String(t ?? "");
+          return (
+            <span
+              title={s}
+              style={{
+                display: "block",
+                fontFamily:
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                fontSize: 12,
+                maxWidth: "100%",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {s}
+            </span>
+          );
+        },
       },
       {
         title: "大小",
@@ -485,6 +504,19 @@ function AdminApp() {
 
   const columns = [
     { title: "昵称", dataIndex: "nick", ellipsis: true },
+    {
+      title: "状态",
+      key: "online",
+      width: 96,
+      render: (_, row) => {
+        const connected = row.online !== false;
+        return (
+          <Typography.Text type={connected ? "success" : "danger"} style={{ fontSize: 13 }}>
+            {connected ? "在线" : "离线"}
+          </Typography.Text>
+        );
+      },
+    },
     { title: "client_id", dataIndex: "client_id", ellipsis: true, width: 200 },
     { title: "IP", dataIndex: "ip", width: 130 },
     { title: "MAC", dataIndex: "mac", width: 150, ellipsis: true },
@@ -503,7 +535,7 @@ function AdminApp() {
   ];
 
   return (
-    <div style={{ padding: 24, maxWidth: 1120, margin: "0 auto", background: token.colorBgLayout, minHeight: "100vh" }}>
+    <div style={{ padding: 24, maxWidth: 1120, margin: "0 auto", background: token.colorBgLayout, minHeight: "100%" }}>
       <div
         style={{
           display: "flex",
@@ -523,12 +555,6 @@ function AdminApp() {
           </Typography.Text>
         ) : null}
       </div>
-      <Typography.Paragraph type="secondary">
-        仅当通过本机回环地址（127.0.0.1）访问时可用。可查看当前在线 WebSocket
-        连接、上传文件列表（含缩略预览）；可用日历选择日期范围后点「查询」筛选；可设置超过若干小时未修改的上传文件由服务端自动删除。
-        「清除所有聊天记录」会同时删除 uploads 下全部已上传文件；亦可仅清除全部上传文件。
-        桌面端有新版本时，将在本页自动弹出提示；请点击「前往下载」在系统默认浏览器中打开发布页或安装包链接。
-      </Typography.Paragraph>
 
       <Card title="局域网用户端地址" style={{ marginBottom: 16 }}>
         {serverInfo ? (
@@ -545,7 +571,7 @@ function AdminApp() {
         )}
       </Card>
 
-      <Card title="在线用户（WebSocket）" style={{ marginBottom: 16 }}>
+      <Card title="在线用户" style={{ marginBottom: 16 }}>
         <Space style={{ marginBottom: 12 }}>
           <Button onClick={fetchOnline} loading={busy}>
             刷新列表
@@ -562,7 +588,7 @@ function AdminApp() {
         />
       </Card>
 
-      <Card title="已上传文件" style={{ marginBottom: 16 }}>
+      <Card title="文件列表" style={{ marginBottom: 16 }}>
         <div
           style={{
             display: "flex",
@@ -617,17 +643,18 @@ function AdminApp() {
         </div>
         <Table
           size="small"
+          tableLayout="fixed"
           rowKey="stored_name"
           dataSource={uploads}
           columns={uploadColumns}
           loading={uploadsLoading}
           pagination={{ pageSize: 15, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
-          scroll={{ x: 720 }}
+          scroll={{ x: 840 }}
           locale={{ emptyText: "暂无数据，请选择日期后点击查询，或不选日期查询全部" }}
         />
       </Card>
 
-      <Card title="危险操作（全部）">
+      <Card title="危险操作">
         <Space wrap>
           <Button danger onClick={onClearChats} disabled={busy}>
             清除所有聊天记录
@@ -642,7 +669,10 @@ function AdminApp() {
         title={filePreview?.name || "预览"}
         open={Boolean(filePreview)}
         onCancel={() => setFilePreview(null)}
-        destroyOnClose
+        destroyOnClose={false}
+        centered
+        transitionName=""
+        maskTransitionName=""
         footer={
           <Space>
             <Button onClick={() => setFilePreview(null)}>关闭</Button>
@@ -661,24 +691,28 @@ function AdminApp() {
         width={Math.min(720, typeof window !== "undefined" ? window.innerWidth - 48 : 700)}
         {...DIALOG_TITLE_CENTER}
       >
-        {filePreview?.kind === "image" ? (
-          <img
-            alt=""
-            src={fileInlineUrl(filePreview.stored)}
-            style={{ maxWidth: "100%", maxHeight: 480, display: "block", margin: "0 auto" }}
-          />
-        ) : filePreview?.kind === "video" ? (
-          <video
-            src={fileInlineUrl(filePreview.stored)}
-            controls
-            playsInline
-            style={{ width: "100%", maxHeight: 480, display: "block", background: "#000" }}
-          />
-        ) : (
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            该类型无法在页面内预览，请点击「下载」在本地打开。
-          </Typography.Paragraph>
-        )}
+        {filePreview ? (
+          filePreview.kind === "image" ? (
+            <img
+              key={filePreview.stored}
+              alt=""
+              src={fileInlineUrl(filePreview.stored)}
+              style={{ maxWidth: "100%", maxHeight: 480, display: "block", margin: "0 auto" }}
+            />
+          ) : filePreview.kind === "video" ? (
+            <video
+              key={filePreview.stored}
+              src={fileInlineUrl(filePreview.stored)}
+              controls
+              playsInline
+              style={{ width: "100%", maxHeight: 480, display: "block", background: "#000" }}
+            />
+          ) : (
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              该类型无法在页面内预览，请点击「下载」在本地打开。
+            </Typography.Paragraph>
+          )
+        ) : null}
       </Modal>
 
       <Modal

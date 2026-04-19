@@ -2390,7 +2390,7 @@ export default function App() {
         {...DIALOG_TITLE_CENTER}
       >
         <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 10, fontSize: 12 }}>
-          绿点表示当前在线，灰点表示不在线（含仅有私聊记录、当前未连接的设备）。
+          绿点表示当前在线，灰点表示不在线
         </Typography.Paragraph>
         {(serverLanIp || "").trim() ? (
           <Typography.Paragraph type="secondary" style={{ marginBottom: 10, fontSize: 12 }}>

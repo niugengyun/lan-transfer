@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
+from contextlib import asynccontextmanager
 import mimetypes
 import os
 import platform
@@ -180,7 +181,17 @@ def _server_port() -> int:
     return DEFAULT_HTTP_PORT
 
 
-app = FastAPI(title="快传-服务端")
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    """应用存活期：注册事件循环并启动上传自动清理后台线程（替代已弃用的 on_event('startup')）。"""
+    global _uvicorn_loop
+    _uvicorn_loop = asyncio.get_running_loop()
+    th = threading.Thread(target=_upload_auto_purge_loop, name="upload-auto-purge", daemon=True)
+    th.start()
+    yield
+
+
+app = FastAPI(title="快传-服务端", lifespan=_app_lifespan)
 
 
 def _client_host(request: Request) -> str:
@@ -694,6 +705,7 @@ class OnlineRegistry:
                         "aliases": aliases,
                         "connected_at": s["connected_at"],
                         "user_agent": s.get("user_agent", ""),
+                        "online": True,
                     }
                 )
             rows.sort(key=lambda r: r["connected_at"])
@@ -1210,14 +1222,6 @@ def _upload_auto_purge_loop() -> None:
         except Exception as exc:
             print(f"[upload-auto-purge] 异常: {exc}", flush=True)
         time.sleep(600)
-
-
-@app.on_event("startup")
-async def _startup_upload_auto_purge_worker() -> None:
-    global _uvicorn_loop
-    _uvicorn_loop = asyncio.get_running_loop()
-    th = threading.Thread(target=_upload_auto_purge_loop, name="upload-auto-purge", daemon=True)
-    th.start()
 
 
 @app.post("/api/clear")
