@@ -1,0 +1,18 @@
+{
+  "name": "快传",
+  "short_name": "快传",
+  "description": "局域网文件互传与聊天",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1677ff",
+  "icons": [
+    {
+      "src": "/static/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

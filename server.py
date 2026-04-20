@@ -1497,6 +1497,15 @@ def site_notification_mp3() -> FileResponse:
     return FileResponse(p, media_type="audio/mpeg")
 
 
+@app.get("/manifest.webmanifest")
+def site_web_manifest() -> FileResponse:
+    """PWA 清单：用于 Safari/浏览器添加到桌面或 Dock。"""
+    p = SPA_DIR / "manifest.webmanifest"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="未找到 manifest.webmanifest，请先构建前端")
+    return FileResponse(p, media_type="application/manifest+json")
+
+
 @app.get("/")
 def index_page() -> FileResponse:
     idx = _spa_index_path()
