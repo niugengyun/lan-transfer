@@ -8,6 +8,7 @@ import {
   Empty,
   Input,
   Modal,
+  Popover,
   Space,
   Table,
   Typography,
@@ -18,6 +19,7 @@ import {
   EditOutlined,
   FileOutlined,
   FolderOpenOutlined,
+  SmileOutlined,
   PaperClipOutlined,
   PlayCircleOutlined,
   SearchOutlined,
@@ -26,6 +28,8 @@ import {
 
 const NICK_KEY = "lan_transfer_nick";
 const CID_KEY = "lan_transfer_client_id";
+const UNREAD_KEY = "lan_transfer_unread_by_chat";
+const AUDIO_UNLOCKED_KEY = "lan_transfer_audio_unlocked";
 /** 与私聊 client_id 不冲突的群组虚拟 id */
 const GROUP_ID = "__lan_group__";
 
@@ -59,9 +63,72 @@ const WX_AVATAR_OTHER = "#10aeff";
 const WX_AVATAR_SELF = "#07c160";
 const WX_SEND_ACTIVE = "#07c160";
 const WX_BUBBLE_RADIUS = 6;
+const MESSAGE_MENU_WIDTH = 86;
+const MESSAGE_MENU_HEIGHT = 38;
+const QUICK_EMOJIS = [
+  "😀", "😁", "😂", "🤣", "😅", "😊", "🙂", "😉", "😍", "😘",
+  "😎", "🤓", "🥳", "🤩", "😴", "🤔", "😭", "😢", "😡", "😤",
+  "😱", "🥲", "🙃", "😇", "🤝", "👍", "👎", "👌", "✌️", "🙏",
+  "👏", "💪", "🎉", "🎊", "🎈", "❤️", "💛", "💚", "💙", "💜",
+  "🔥", "🌟", "✅", "❗", "❓", "🍎", "☕", "🌈"
+];
+
+function readUiRouteState() {
+  if (typeof window === "undefined") {
+    return { chatId: GROUP_ID, mobileOpen: false };
+  }
+  try {
+    const u = new URL(window.location.href);
+    const chat = (u.searchParams.get("chat") || "").trim();
+    const mobile = (u.searchParams.get("mobile") || "").trim() === "1";
+    return { chatId: chat || GROUP_ID, mobileOpen: mobile };
+  } catch {
+    return { chatId: GROUP_ID, mobileOpen: false };
+  }
+}
+
+function writeUiRouteState(chatId, mobileOpen) {
+  if (typeof window === "undefined") return;
+  try {
+    const u = new URL(window.location.href);
+    const cid = (chatId || "").trim();
+    if (cid && cid !== GROUP_ID) {
+      u.searchParams.set("chat", cid);
+    } else {
+      u.searchParams.delete("chat");
+    }
+    if (mobileOpen) u.searchParams.set("mobile", "1");
+    else u.searchParams.delete("mobile");
+    const qs = u.searchParams.toString();
+    const next = `${u.pathname}${qs ? `?${qs}` : ""}${u.hash || ""}`;
+    const cur = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
+    if (next !== cur) window.history.replaceState(null, "", next);
+  } catch {
+    /* ignore */
+  }
+}
 
 function randomId() {
   return "c_" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+}
+
+function readUnreadByChat() {
+  try {
+    const raw = localStorage.getItem(UNREAD_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const key = String(k || "").trim();
+      const n = Number(v);
+      if (!key || !Number.isFinite(n) || n <= 0) continue;
+      out[key] = Math.floor(n);
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 function fmtSize(n) {
@@ -120,16 +187,19 @@ function dmPeerIdFile(data, myIds) {
 function buildThreadsFromHistory(clientId, items, myIdSet) {
   const me = myIdSet && myIdSet.size ? myIdSet : new Set([clientId]);
   const threads = { [GROUP_ID]: [] };
+  const revokedIds = new Set();
   const sorted = [...(items || [])].sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
   for (const data of sorted) {
     if (data.type === "text") {
       if (data.scope === "group" || !data.to_client_id) {
         threads[GROUP_ID].push({
+          id: data.id || null,
           kind: "text",
           mine: me.has(data.sender_client_id),
           from: data.from,
           fromClientId: data.sender_client_id || null,
           body: data.body,
+          revoked: false,
           ts: data.ts,
           _k: data.id || `h-g-${data.ts}-${threads[GROUP_ID].length}`,
         });
@@ -140,11 +210,13 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
         if (!peer) continue;
         if (!threads[peer]) threads[peer] = [];
         threads[peer].push({
+          id: data.id || null,
           kind: "text",
           mine: me.has(s),
           from: data.from,
           fromClientId: data.sender_client_id || null,
           body: data.body,
+          revoked: false,
           ts: data.ts,
           _k: data.id || `h-${peer}-${data.ts}`,
         });
@@ -152,6 +224,7 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
     } else if (data.type === "file") {
       if (!data.to_client_id) {
         threads[GROUP_ID].push({
+          id: data.id || null,
           kind: "file",
           name: data.original_name || data.stored_name,
           size: data.size,
@@ -160,6 +233,7 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
           stored: data.stored_name,
           ts: data.ts,
           mine: me.has(data.from_client_id),
+          revoked: false,
           fileMissing: Boolean(data.file_missing),
           _k: data.id || `f-g-${data.stored_name}`,
         });
@@ -168,6 +242,7 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
         if (!peer) continue;
         if (!threads[peer]) threads[peer] = [];
         threads[peer].push({
+          id: data.id || null,
           kind: "file",
           name: data.original_name || data.stored_name,
           size: data.size,
@@ -176,10 +251,21 @@ function buildThreadsFromHistory(clientId, items, myIdSet) {
           stored: data.stored_name,
           ts: data.ts,
           mine: me.has(data.from_client_id),
+          revoked: false,
           fileMissing: Boolean(data.file_missing),
           _k: data.id || `f-${peer}-${data.stored_name}`,
         });
       }
+    } else if (data.type === "revoke") {
+      const tid = String(data.target_id || "").trim();
+      if (tid) revokedIds.add(tid);
+    }
+  }
+  if (revokedIds.size) {
+    for (const k of Object.keys(threads)) {
+      const arr = threads[k];
+      if (!Array.isArray(arr)) continue;
+      threads[k] = arr.map((row) => (row?.id && revokedIds.has(String(row.id)) ? { ...row, revoked: true } : row));
     }
   }
   return threads;
@@ -296,20 +382,22 @@ export default function App() {
   }, [nick]);
 
   const [devices, setDevices] = useState([]);
+  const [appVersion, setAppVersion] = useState("");
   /** 当前 HTTP 服务所在机器的内网 IPv4（与 /api/lan-host 一致，全站只展示此地址） */
   const [serverLanIp, setServerLanIp] = useState("");
   const [search, setSearch] = useState("");
   const [wsState, setWsState] = useState("连接中…");
   const [threads, setThreads] = useState({});
-  /** 默认打开群组 */
-  const [selectedChatId, setSelectedChatId] = useState(GROUP_ID);
+  /** 默认打开群组；支持由 URL 恢复当前会话 */
+  const [selectedChatId, setSelectedChatId] = useState(() => readUiRouteState().chatId);
   const isMobile = useIsMobile();
   /** 手机端：列表与聊天分屏切换 */
-  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(() => readUiRouteState().mobileOpen);
   const [fileDrawer, setFileDrawer] = useState(false);
   const [files, setFiles] = useState([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingPasteFiles, setPendingPasteFiles] = useState([]);
   const inputValueRef = useRef("");
   useLayoutEffect(() => {
     inputValueRef.current = input;
@@ -320,9 +408,11 @@ export default function App() {
   /** 消息列表点头像：{ clientId, fallbackNick }，clientId 可为 null（旧记录无设备 id） */
   const [userInfoModal, setUserInfoModal] = useState(null);
   /** 各会话未读条数（仅统计他人新消息；当前正在查看的会话不计入） */
-  const [unreadByChat, setUnreadByChat] = useState({});
+  const [unreadByChat, setUnreadByChat] = useState(() => readUnreadByChat());
   /** 电脑端：聊天区「用户列表」弹窗 */
   const [lanUsersModalOpen, setLanUsersModalOpen] = useState(false);
+  /** 自定义消息菜单：桌面右键 / 手机长按 */
+  const [messageContextMenu, setMessageContextMenu] = useState(null);
 
   const wsRef = useRef(null);
   const selectedChatRef = useRef(selectedChatId);
@@ -330,6 +420,7 @@ export default function App() {
   const isMobileRef = useRef(isMobile);
   const reconnectRef = useRef(null);
   const sendInFlightRef = useRef(false);
+  const soundReadyTimerRef = useRef(null);
   /** 仅右侧聊天消息区滚动，禁止 scrollIntoView（会滚动祖先导致底栏被顶出视口） */
   const chatScrollRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -340,9 +431,19 @@ export default function App() {
   const notificationUnlockInFlightRef = useRef(false);
   /** WebSocket 里 play() 被 WKWebView 等拒绝时置位，待下一次用户手势解锁后补播 */
   const notificationPlayPendingRef = useRef(false);
+  /** 仅在完成首轮 history 同步后允许播放新消息提示音，避免刷新/重连误响。 */
+  const soundReadyRef = useRef(false);
 
-  const unlockNotificationAudioIfNeeded = useCallback(async () => {
-    if (notificationUnlockedRef.current) return;
+  useEffect(() => {
+    try {
+      notificationUnlockedRef.current = sessionStorage.getItem(AUDIO_UNLOCKED_KEY) === "1";
+    } catch {
+      notificationUnlockedRef.current = false;
+    }
+  }, []);
+
+  const unlockNotificationAudioIfNeeded = useCallback(async (force = false) => {
+    if (notificationUnlockedRef.current && !force) return;
     if (notificationUnlockInFlightRef.current) return;
     notificationUnlockInFlightRef.current = true;
     try {
@@ -359,7 +460,18 @@ export default function App() {
       aud.muted = false;
       aud.volume = 1;
       notificationUnlockedRef.current = true;
+      try {
+        sessionStorage.setItem(AUDIO_UNLOCKED_KEY, "1");
+      } catch {
+        /* ignore */
+      }
     } catch {
+      notificationUnlockedRef.current = false;
+      try {
+        sessionStorage.removeItem(AUDIO_UNLOCKED_KEY);
+      } catch {
+        /* ignore */
+      }
       try {
         if (notificationAudioRef.current) notificationAudioRef.current.muted = false;
       } catch {
@@ -383,12 +495,41 @@ export default function App() {
       a.currentTime = 0;
       const p = a.play();
       if (p !== undefined) {
-        void p.catch(() => {
-          notificationPlayPendingRef.current = true;
-        });
+        void p.then(
+          () => {
+            notificationUnlockedRef.current = true;
+            try {
+              sessionStorage.setItem(AUDIO_UNLOCKED_KEY, "1");
+            } catch {
+              /* ignore */
+            }
+          },
+          () => {
+            notificationPlayPendingRef.current = true;
+            notificationUnlockedRef.current = false;
+            try {
+              sessionStorage.removeItem(AUDIO_UNLOCKED_KEY);
+            } catch {
+              /* ignore */
+            }
+          }
+        );
+      } else {
+        notificationUnlockedRef.current = true;
+        try {
+          sessionStorage.setItem(AUDIO_UNLOCKED_KEY, "1");
+        } catch {
+          /* ignore */
+        }
       }
     } catch {
       notificationPlayPendingRef.current = true;
+      notificationUnlockedRef.current = false;
+      try {
+        sessionStorage.removeItem(AUDIO_UNLOCKED_KEY);
+      } catch {
+        /* ignore */
+      }
     }
   }, []);
 
@@ -400,29 +541,9 @@ export default function App() {
   useEffect(() => {
     const onGesture = () => {
       void (async () => {
-        await unlockNotificationAudioIfNeeded();
-        if (!notificationPlayPendingRef.current) return;
-        try {
-          if (typeof Audio === "undefined") {
-            notificationPlayPendingRef.current = false;
-            return;
-          }
-          const a = notificationAudioRef.current;
-          if (!a) {
-            notificationPlayPendingRef.current = false;
-            return;
-          }
-          a.muted = false;
-          a.volume = 1;
-          a.currentTime = 0;
-          const p2 = a.play();
-          if (p2 !== undefined) {
-            await p2;
-          }
-          notificationPlayPendingRef.current = false;
-        } catch {
-          /* 仍无播放权限则保留 pending，下次手势再试 */
-        }
+        await unlockNotificationAudioIfNeeded(notificationPlayPendingRef.current);
+        // 仅做解锁，不在进入页面/点击界面时补播旧 pending，避免误响一声。
+        notificationPlayPendingRef.current = false;
       })();
     };
     const opts = { capture: true, passive: true };
@@ -451,12 +572,29 @@ export default function App() {
       if (!chatId) return;
       setThreads((prev) => {
         const cur = prev[chatId] || [];
-        return { ...prev, [chatId]: [...cur, { ...row, _k: Math.random().toString(36).slice(2) }] };
+        return {
+          ...prev,
+          [chatId]: [...cur, { ...row, revoked: Boolean(row.revoked), _k: row.id || Math.random().toString(36).slice(2) }],
+        };
       });
       setTimeout(scrollBottom, 50);
     },
     [scrollBottom]
   );
+
+  const markMessageRevoked = useCallback((targetId) => {
+    const tid = String(targetId || "").trim();
+    if (!tid) return;
+    setThreads((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        const arr = next[k];
+        if (!Array.isArray(arr)) continue;
+        next[k] = arr.map((row) => (row?.id && String(row.id) === tid ? { ...row, revoked: true } : row));
+      }
+      return next;
+    });
+  }, []);
 
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
@@ -489,6 +627,11 @@ export default function App() {
   }, []);
 
   const connectWs = useCallback(() => {
+    if (soundReadyTimerRef.current) {
+      clearTimeout(soundReadyTimerRef.current);
+      soundReadyTimerRef.current = null;
+    }
+    soundReadyRef.current = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const n = (nick || "").trim() || "匿名";
     const cid = clientIdRef.current;
@@ -504,6 +647,10 @@ export default function App() {
       setWsState("已连接");
       ws.send(JSON.stringify({ type: "join", from: n }));
       fetchOnline();
+      // 兜底：若 history 因异常未返回，仍在短延时后恢复提示音能力，避免刷新后一直无声。
+      soundReadyTimerRef.current = setTimeout(() => {
+        soundReadyRef.current = true;
+      }, 1200);
     };
     ws.onclose = () => {
       setWsState("已断开，重连中…");
@@ -523,7 +670,10 @@ export default function App() {
         const sid = selectedChatRef.current;
         const mob = isMobileRef.current;
         const open = mobileChatOpenRef.current;
-        const viewingThisChat = sid === chatId && (!mob || open);
+        const viewingThisChat =
+          chatId === GROUP_ID
+            ? sid === GROUP_ID && (!mob || open)
+            : sid === chatId && (!mob || open);
         if (viewingThisChat) return;
         setUnreadByChat((p) => ({ ...p, [chatId]: (p[chatId] || 0) + 1 }));
       };
@@ -572,12 +722,17 @@ export default function App() {
         }
         const nextThreads = buildThreadsFromHistory(primary, data.items, merged);
         setThreads(nextThreads);
-        setUnreadByChat({});
         setSelectedChatId((sel) => {
           if (sel === GROUP_ID) return sel;
           if (nextThreads[sel]) return sel;
           return GROUP_ID;
         });
+        // history 到达即认为同步完成，可开启提示音。
+        if (soundReadyTimerRef.current) {
+          clearTimeout(soundReadyTimerRef.current);
+          soundReadyTimerRef.current = null;
+        }
+        soundReadyRef.current = true;
         return;
       }
       if (data.type === "chat_history_cleared") {
@@ -594,36 +749,41 @@ export default function App() {
         if (data.scope === "group" || !data.to_client_id) {
           const mine = me().has(data.sender_client_id);
           appendToThread(GROUP_ID, {
+            id: data.id || null,
             kind: "text",
             mine,
             from: data.from,
             fromClientId: data.sender_client_id || null,
             body: data.body,
+            revoked: false,
             ts: data.ts,
           });
           bumpUnreadIfNeeded(GROUP_ID, mine);
-          if (!mine) playNewMessageNotification();
+          if (!mine && soundReadyRef.current) playNewMessageNotification();
           return;
         }
         const peer = dmPeerId(data, me());
         if (!peer) return;
         const mine = me().has(data.sender_client_id);
         appendToThread(peer, {
+          id: data.id || null,
           kind: "text",
           mine,
           from: data.from,
           fromClientId: data.sender_client_id || null,
           body: data.body,
+          revoked: false,
           ts: data.ts,
         });
         bumpUnreadIfNeeded(peer, mine);
-        if (!mine) playNewMessageNotification();
+        if (!mine && soundReadyRef.current) playNewMessageNotification();
         return;
       }
       if (data.type === "file") {
         if (!data.to_client_id) {
           const mine = me().has(data.from_client_id);
           appendToThread(GROUP_ID, {
+            id: data.id || null,
             kind: "file",
             name: data.original_name || data.stored_name,
             size: data.size,
@@ -632,9 +792,10 @@ export default function App() {
             stored: data.stored_name,
             ts: data.ts,
             mine,
+            revoked: false,
           });
           bumpUnreadIfNeeded(GROUP_ID, mine);
-          if (!mine) playNewMessageNotification();
+          if (!mine && soundReadyRef.current) playNewMessageNotification();
           loadFiles();
           return;
         }
@@ -642,6 +803,7 @@ export default function App() {
         if (peer) {
           const mine = me().has(data.from_client_id);
           appendToThread(peer, {
+            id: data.id || null,
             kind: "file",
             name: data.original_name || data.stored_name,
             size: data.size,
@@ -650,11 +812,16 @@ export default function App() {
             stored: data.stored_name,
             ts: data.ts,
             mine,
+            revoked: false,
           });
           bumpUnreadIfNeeded(peer, mine);
-          if (!mine) playNewMessageNotification();
+          if (!mine && soundReadyRef.current) playNewMessageNotification();
         }
         loadFiles();
+        return;
+      }
+      if (data.type === "message_revoked") {
+        markMessageRevoked(data.target_id);
         return;
       }
       if (data.type === "uploads_purged" && Array.isArray(data.stored_names)) {
@@ -689,13 +856,17 @@ export default function App() {
         return;
       }
     };
-  }, [nick, appendToThread, loadFiles, message, fetchOnline, playNewMessageNotification]);
+  }, [nick, appendToThread, loadFiles, message, fetchOnline, playNewMessageNotification, markMessageRevoked]);
 
   useEffect(() => {
     connectWs();
     loadFiles();
     const poll = setInterval(fetchOnline, 4000);
     return () => {
+      if (soundReadyTimerRef.current) {
+        clearTimeout(soundReadyTimerRef.current);
+        soundReadyTimerRef.current = null;
+      }
       clearInterval(poll);
       clearTimeout(reconnectRef.current);
       wsRef.current?.close();
@@ -720,12 +891,43 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/app/version");
+        if (!r.ok) return;
+        const j = await r.json();
+        const v = String(j.version || "").trim();
+        if (!cancelled && v) setAppVersion(v);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem(NICK_KEY, nick);
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "join", from: (nick || "").trim() || "匿名" }));
     }
   }, [nick]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(UNREAD_KEY, JSON.stringify(unreadByChat || {}));
+    } catch {
+      /* ignore */
+    }
+  }, [unreadByChat]);
+
+  // 将当前会话与手机端开合状态写入 URL，刷新后可回到当前页面。
+  useEffect(() => {
+    writeUiRouteState(selectedChatId, mobileChatOpen);
+  }, [selectedChatId, mobileChatOpen]);
 
   useEffect(() => {
     if (!isMobile) setMobileChatOpen(false);
@@ -738,6 +940,35 @@ export default function App() {
   useEffect(() => {
     if (lanUsersModalOpen) fetchOnline();
   }, [lanUsersModalOpen, fetchOnline]);
+
+  useEffect(() => {
+    if (!isMobile) return undefined;
+    // iOS Safari 在 user-scalable=no 下仍可能触发手势缩放，这里显式阻止。
+    const preventGesture = (e) => e.preventDefault();
+    const preventContextMenu = (e) => e.preventDefault();
+    document.addEventListener("gesturestart", preventGesture);
+    document.addEventListener("gesturechange", preventGesture);
+    document.addEventListener("gestureend", preventGesture);
+    document.addEventListener("contextmenu", preventContextMenu);
+    return () => {
+      document.removeEventListener("gesturestart", preventGesture);
+      document.removeEventListener("gesturechange", preventGesture);
+      document.removeEventListener("gestureend", preventGesture);
+      document.removeEventListener("contextmenu", preventContextMenu);
+    };
+  }, [isMobile]);
+
+  useEffect(() => {
+    const close = () => setMessageContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, []);
 
   /** 用户列表仅群组可用：切到私聊时若弹窗仍开着则关闭 */
   useEffect(() => {
@@ -1002,49 +1233,134 @@ export default function App() {
     });
   }, [selectedChatId, currentRows.length, mobileChatOpen]);
 
-  const sendText = useCallback(async () => {
-    const body = inputValueRef.current.trim();
-    if (!body || sendInFlightRef.current) return;
-    sendInFlightRef.current = true;
-    try {
-      await unlockNotificationAudioIfNeeded();
-      const deadline = Date.now() + 4000;
-      while (Date.now() < deadline) {
-        const ws = wsRef.current;
-        if (!ws) {
-          message.warning("未连接到服务器");
-          return;
-        }
-        if (ws.readyState === WebSocket.OPEN) {
-          const n = (nickRef.current || "").trim() || "匿名";
-          const sid = selectedChatRef.current;
-          const group = sid === GROUP_ID;
-          const payload = group
-            ? JSON.stringify({ type: "text", from: n, body, scope: "group" })
-            : JSON.stringify({ type: "text", from: n, body, to_client_id: sid });
-          try {
-            ws.send(payload);
-          } catch {
-            message.warning("发送失败，请稍后再试");
-            return;
+  const sendBody = useCallback(
+    async (rawBody) => {
+      const body = (rawBody || "").trim();
+      if (!body || sendInFlightRef.current) return false;
+      sendInFlightRef.current = true;
+      try {
+        await unlockNotificationAudioIfNeeded();
+        const deadline = Date.now() + 4000;
+        while (Date.now() < deadline) {
+          const ws = wsRef.current;
+          if (!ws) {
+            message.warning("未连接到服务器");
+            return false;
           }
-          setInput((prev) => (prev.trim() === body ? "" : prev));
-          return;
+          if (ws.readyState === WebSocket.OPEN) {
+            const n = (nickRef.current || "").trim() || "匿名";
+            const sid = selectedChatRef.current;
+            const group = sid === GROUP_ID;
+            const payload = group
+              ? JSON.stringify({ type: "text", from: n, body, scope: "group" })
+              : JSON.stringify({ type: "text", from: n, body, to_client_id: sid });
+            try {
+              ws.send(payload);
+            } catch {
+              message.warning("发送失败，请稍后再试");
+              return false;
+            }
+            setInput((prev) => (prev.trim() === body ? "" : prev));
+            return true;
+          }
+          if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+            message.warning("未连接到服务器");
+            return false;
+          }
+          await new Promise((r) => setTimeout(r, 40));
         }
-        if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
-          message.warning("未连接到服务器");
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 40));
+        message.warning("连接超时，请稍后再试");
+        return false;
+      } finally {
+        sendInFlightRef.current = false;
       }
-      message.warning("连接超时，请稍后再试");
-    } finally {
-      sendInFlightRef.current = false;
-    }
-  }, [message, unlockNotificationAudioIfNeeded]);
+    },
+    [message, unlockNotificationAudioIfNeeded]
+  );
+
+  const sendText = useCallback(async () => {
+    const body = inputValueRef.current;
+    await sendBody(body);
+  }, [sendBody]);
+
+  const sendRevoke = useCallback(
+    (targetId) => {
+      const tid = String(targetId || "").trim();
+      if (!tid) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        message.warning("未连接到服务器");
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ type: "revoke", target_id: tid }));
+      } catch {
+        message.warning("撤回失败，请稍后再试");
+      }
+    },
+    [message]
+  );
+
+  const copyMessageText = useCallback(
+    async (text) => {
+      const t = String(text || "");
+      if (!t.trim()) return;
+      try {
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(t);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = t;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+        message.success("已复制");
+      } catch {
+        message.warning("复制失败");
+      }
+    },
+    [message]
+  );
+
+  const openMessageMenu = useCallback(
+    ({ x, y, row, mine }) => {
+      if (!row || row.revoked) return;
+      if (mine && row.id) {
+        setMessageContextMenu({ x, y, action: "revoke", row });
+        return;
+      }
+      if (!mine && row.kind === "text" && row.body) {
+        setMessageContextMenu({ x, y, action: "copy", text: row.body, row });
+      }
+    },
+    []
+  );
+
+  const onMessageTap = useCallback(
+    (e, row, mine) => {
+      if (mediaPreview) return;
+      e.stopPropagation();
+      const rect = e.currentTarget?.getBoundingClientRect?.();
+      const px = rect ? rect.left + rect.width / 2 : 120;
+      // 菜单显示在消息气泡下方，尖角指向气泡下边界中点。
+      const py = rect ? rect.bottom + 10 : 120;
+      setMessageContextMenu(null);
+      openMessageMenu({ x: px, y: py, row, mine });
+    },
+    [openMessageMenu, mediaPreview]
+  );
+
+  const appendEmojiToInput = useCallback((emoji) => {
+    setInput((prev) => `${prev || ""}${emoji}`);
+  }, []);
 
   const onPickFiles = async (list) => {
-    if (!list?.length) return;
+    if (!list?.length) return false;
     setUploading(true);
     const n = (nick || "").trim() || "匿名";
     try {
@@ -1061,10 +1377,45 @@ export default function App() {
       }
       message.success(isGroup ? "已上传到群组（所有人可见）" : "已发送给对方");
       loadFiles();
+      return true;
     } catch {
       message.error("上传失败");
+      return false;
     } finally {
       setUploading(false);
+    }
+  };
+
+  const onPasteFiles = (e) => {
+    const cb = e?.clipboardData;
+    if (!cb) return;
+    const files = [];
+    if (cb.files && cb.files.length) {
+      files.push(...Array.from(cb.files));
+    } else if (cb.items && cb.items.length) {
+      for (const item of cb.items) {
+        if (item.kind !== "file") continue;
+        const f = item.getAsFile?.();
+        if (f) files.push(f);
+      }
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    setPendingPasteFiles((prev) => [...prev, ...files]);
+  };
+
+  const removePendingPasteFileAt = (idx) => {
+    setPendingPasteFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const sendCurrentPayload = async () => {
+    const hasText = !!inputValueRef.current.trim();
+    const hasFiles = pendingPasteFiles.length > 0;
+    if (!hasText && !hasFiles) return;
+    if (hasText) await sendText();
+    if (hasFiles) {
+      const ok = await onPickFiles(pendingPasteFiles);
+      if (ok) setPendingPasteFiles([]);
     }
   };
 
@@ -1242,7 +1593,7 @@ export default function App() {
       const inlineSrc = r.fileMissing ? "" : fileInlineUrl(r.stored);
       const openMedia = () => {
         if (r.fileMissing) return;
-        setMediaPreview({ kind: mediaKind, stored: r.stored, name: r.name });
+        setMediaPreview({ kind: mediaKind || "file", stored: r.stored, name: r.name, size: r.size || 0 });
       };
       const onMediaKeyDown = (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -1253,6 +1604,9 @@ export default function App() {
       return (
         <div
           key={r._k}
+          onContextMenu={(e) => {
+            e.preventDefault();
+          }}
           style={{
             display: "flex",
             justifyContent: mine ? "flex-end" : "flex-start",
@@ -1292,16 +1646,22 @@ export default function App() {
               </Typography.Text>
             )}
             <div
+              onClick={(e) => onMessageTap(e, r, mine)}
               style={{
                 marginTop: showWho && !mine ? 2 : 0,
                 background: mine ? WX_BUBBLE_ME : WX_BUBBLE_OTHER,
-                color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT,
+                color: r.revoked ? WX_META : mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT,
                 borderRadius: WX_BUBBLE_RADIUS,
                 padding: "10px 14px",
                 border: mine ? "none" : "1px solid #eaeaea",
               }}
             >
-              {r.fileMissing ? (
+              {r.revoked ? (
+                <Typography.Text type="secondary" style={{ fontStyle: "italic" }}>
+                  {mine ? "你撤回了一条消息" : "对方撤回了一条消息"}
+                </Typography.Text>
+              ) : null}
+              {!r.revoked && r.fileMissing ? (
                 <>
                   <Typography.Text style={{ fontSize: 13, color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT }}>
                     {r.name}
@@ -1317,11 +1677,14 @@ export default function App() {
                   </Typography.Text>
                 </>
               ) : null}
-              {!r.fileMissing && mediaKind === "image" && (
+              {!r.revoked && !r.fileMissing && mediaKind === "image" && (
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={openMedia}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openMedia();
+                  }}
                   onKeyDown={onMediaKeyDown}
                   style={{ cursor: "pointer", marginBottom: 6 }}
                 >
@@ -1339,11 +1702,14 @@ export default function App() {
                   />
                 </div>
               )}
-              {!r.fileMissing && mediaKind === "video" && (
+              {!r.revoked && !r.fileMissing && mediaKind === "video" && (
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={openMedia}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openMedia();
+                  }}
                   onKeyDown={onMediaKeyDown}
                   style={{
                     position: "relative",
@@ -1387,28 +1753,36 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {!r.fileMissing && mediaKind ? (
+              {!r.revoked && !r.fileMissing && mediaKind ? (
                 <div>
-                  <Typography.Text style={{ fontSize: 13, color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT }}>
+                  <Typography.Text
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ fontSize: 13, color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT }}
+                  >
                     {r.name}
                   </Typography.Text>
                   <div>
-                    <Typography.Text style={{ fontSize: 12, color: WX_META }}>
+                    <Typography.Text onClick={(e) => e.stopPropagation()} style={{ fontSize: 12, color: WX_META }}>
                       {fmtSize(r.size || 0)}
                     </Typography.Text>
                   </div>
                 </div>
               ) : null}
-              {!r.fileMissing && !mediaKind ? (
+              {!r.revoked && !r.fileMissing && !mediaKind ? (
                 <>
                   <Typography.Link
                     href={fileDownloadUrl(r.stored)}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openMedia();
+                    }}
                     style={{ color: WX_LINK }}
                   >
                     {r.name}
                   </Typography.Link>
                   <div>
-                    <Typography.Text style={{ fontSize: 12, color: WX_META }}>
+                    <Typography.Text onClick={(e) => e.stopPropagation()} style={{ fontSize: 12, color: WX_META }}>
                       {fmtSize(r.size || 0)}
                     </Typography.Text>
                   </div>
@@ -1463,6 +1837,9 @@ export default function App() {
     return (
       <div
         key={r._k}
+        onContextMenu={(e) => {
+          e.preventDefault();
+        }}
         style={{
           display: "flex",
           justifyContent: mine ? "flex-end" : "flex-start",
@@ -1502,10 +1879,11 @@ export default function App() {
             </Typography.Text>
           )}
           <div
+            onClick={(e) => onMessageTap(e, r, mine)}
             style={{
               marginTop: showFromLine ? 2 : 0,
               background: mine ? WX_BUBBLE_ME : WX_BUBBLE_OTHER,
-              color: mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT,
+              color: r.revoked ? WX_META : mine ? WX_BUBBLE_ME_TEXT : WX_BUBBLE_OTHER_TEXT,
               borderRadius: WX_BUBBLE_RADIUS,
               padding: "9px 13px",
               fontSize: isMobile ? 16 : 15,
@@ -1515,7 +1893,13 @@ export default function App() {
               border: mine ? "none" : "1px solid #eaeaea",
             }}
           >
-            {r.body}
+            {r.revoked ? (
+              <Typography.Text type="secondary" style={{ fontStyle: "italic" }}>
+                {mine ? "你撤回了一条消息" : "对方撤回了一条消息"}
+              </Typography.Text>
+            ) : (
+              r.body
+            )}
           </div>
           <Typography.Text
             style={{
@@ -1609,6 +1993,9 @@ export default function App() {
   return (
     <div
       className="lan-app-shell"
+      onContextMenu={(e) => {
+        e.preventDefault();
+      }}
       style={{
         background: pageBg,
         paddingLeft: "env(safe-area-inset-left, 0px)",
@@ -1810,11 +2197,13 @@ export default function App() {
               role="button"
               tabIndex={0}
               onClick={() => {
+                selectedChatRef.current = GROUP_ID;
                 setSelectedChatId(GROUP_ID);
                 openChatMobile();
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
+                  selectedChatRef.current = GROUP_ID;
                   setSelectedChatId(GROUP_ID);
                   openChatMobile();
                 }
@@ -1882,11 +2271,13 @@ export default function App() {
                     role="button"
                     tabIndex={0}
                     onClick={() => {
+                      selectedChatRef.current = item.client_id;
                       setSelectedChatId(item.client_id);
                       openChatMobile();
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
+                        selectedChatRef.current = item.client_id;
                         setSelectedChatId(item.client_id);
                         openChatMobile();
                       }
@@ -1953,6 +2344,19 @@ export default function App() {
               })
             )}
           </div>
+          {!isMobile && appVersion ? (
+            <div
+              style={{
+                flexShrink: 0,
+                padding: "4px 0 8px",
+                textAlign: "center",
+              }}
+            >
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                v{appVersion}
+              </Typography.Text>
+            </div>
+          ) : null}
         </div>
 
         <div
@@ -2289,6 +2693,67 @@ export default function App() {
                   background: "#ffffff",
                 }}
               />
+              <Popover
+                trigger="click"
+                placement={isMobile ? "topRight" : "top"}
+                content={
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(8, 1fr)",
+                      gap: 6,
+                      width: isMobile ? "min(320px, calc(100vw - 32px))" : 320,
+                      maxWidth: "calc(100vw - 24px)",
+                    }}
+                  >
+                    {QUICK_EMOJIS.map((em) => (
+                      <button
+                        key={em}
+                        type="button"
+                        onClick={() => appendEmojiToInput(em)}
+                        style={{
+                          border: "1px solid #eee",
+                          borderRadius: 6,
+                          background: "#fff",
+                          cursor: "pointer",
+                          fontSize: 20,
+                          lineHeight: "28px",
+                          padding: 2,
+                        }}
+                        aria-label={`发送表情 ${em}`}
+                      >
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                }
+                styles={{
+                  root: isMobile
+                    ? {
+                        maxWidth: "calc(100vw - 24px)",
+                        marginLeft: 8,
+                        marginRight: 8,
+                      }
+                    : undefined,
+                  body: {
+                    padding: 8,
+                    overflow: "hidden",
+                  },
+                }}
+              >
+                <Button
+                  type="default"
+                  shape="circle"
+                  icon={<SmileOutlined style={{ fontSize: isMobile ? 18 : 16, color: token.colorTextSecondary }} />}
+                  style={{
+                    flexShrink: 0,
+                    color: token.colorTextSecondary,
+                    borderColor: WX_CHAT_TOP_BORDER,
+                    background: "#ffffff",
+                  }}
+                  aria-label="表情"
+                />
+              </Popover>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -2304,21 +2769,65 @@ export default function App() {
                   flex: 1,
                   minWidth: 0,
                   display: "flex",
-                  alignItems: "center",
+                  flexDirection: "column",
+                  alignItems: "stretch",
                   background: "#ffffff",
                   borderRadius: 6,
                   border: `1px solid ${WX_CHAT_TOP_BORDER}`,
                   padding: "4px 10px",
                 }}
               >
+                {pendingPasteFiles.length > 0 ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 2, paddingBottom: 6 }}>
+                    {pendingPasteFiles.map((f, idx) => (
+                      <div
+                        key={`${f.name}-${f.size}-${idx}`}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          maxWidth: "100%",
+                          border: `1px solid ${WX_CHAT_TOP_BORDER}`,
+                          borderRadius: 999,
+                          padding: "2px 8px",
+                          background: "#fafafa",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#555",
+                            maxWidth: isMobile ? 160 : 240,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={`${f.name} (${fmtSize(f.size || 0)})`}
+                        >
+                          {f.name} · {fmtSize(f.size || 0)}
+                        </span>
+                        <Button
+                          type="text"
+                          size="small"
+                          onClick={() => removePendingPasteFileAt(idx)}
+                          style={{ padding: 0, minWidth: 16, height: 16, lineHeight: "16px", color: "#999" }}
+                          aria-label={`删除 ${f.name}`}
+                        >
+                          ×
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <Input.TextArea
                   autoSize={{ minRows: 1, maxRows: isMobile ? 6 : 8 }}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
+                  onPaste={onPasteFiles}
                   onPressEnter={(e) => {
                     if (!e.shiftKey) {
                       e.preventDefault();
-                      void sendText();
+                      void sendCurrentPayload();
                     }
                   }}
                   placeholder={isGroup ? "群发消息给所有人…" : "私聊消息…"}
@@ -2336,7 +2845,7 @@ export default function App() {
               <Button
                 type="text"
                 onClick={() => {
-                  if (input.trim()) void sendText();
+                  if (input.trim() || pendingPasteFiles.length) void sendCurrentPayload();
                 }}
                 style={{
                   flexShrink: 0,
@@ -2344,8 +2853,8 @@ export default function App() {
                   height: "auto",
                   fontSize: isMobile ? 17 : 15,
                   fontWeight: 600,
-                  color: input.trim() ? WX_SEND_ACTIVE : "#b2b2b2",
-                  cursor: input.trim() ? "pointer" : "default",
+                  color: input.trim() || pendingPasteFiles.length ? WX_SEND_ACTIVE : "#b2b2b2",
+                  cursor: input.trim() || pendingPasteFiles.length ? "pointer" : "default",
                 }}
               >
                 发送
@@ -2354,6 +2863,92 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {messageContextMenu ? (
+        <div
+          onContextMenu={(e) => e.preventDefault()}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            left: Math.max(8, Math.min(window.innerWidth - MESSAGE_MENU_WIDTH - 8, messageContextMenu.x - MESSAGE_MENU_WIDTH / 2)),
+            top: Math.max(8, Math.min(window.innerHeight - MESSAGE_MENU_HEIGHT - 8, messageContextMenu.y)),
+            zIndex: 2200,
+            background: "#fff",
+            border: "1px solid rgba(0,0,0,0.12)",
+            boxShadow: "0 8px 20px rgba(0,0,0,0.16)",
+            borderRadius: 8,
+            overflow: "visible",
+            minWidth: MESSAGE_MENU_WIDTH,
+          }}
+        >
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: -6,
+              left: "50%",
+              width: 10,
+              height: 10,
+              background: "#fff",
+              borderLeft: "1px solid rgba(0,0,0,0.12)",
+              borderTop: "1px solid rgba(0,0,0,0.12)",
+              transform: "translateX(-50%) rotate(45deg)",
+            }}
+          />
+          <div
+            style={{
+              overflow: "hidden",
+              borderRadius: 8,
+              background: "#fff",
+            }}
+          >
+            {messageContextMenu.action === "revoke" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const tid = messageContextMenu?.row?.id;
+                  setMessageContextMenu(null);
+                  sendRevoke(tid);
+                }}
+                style={{
+                  width: "100%",
+                  border: "none",
+                  background: "transparent",
+                  textAlign: "left",
+                  padding: "7px 10px",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  color: "#000000",
+                }}
+              >
+                撤回
+              </button>
+            ) : null}
+            {messageContextMenu.action === "copy" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const text = messageContextMenu?.text || "";
+                  setMessageContextMenu(null);
+                  void copyMessageText(text);
+                }}
+                style={{
+                  width: "100%",
+                  border: "none",
+                  background: "transparent",
+                  textAlign: "left",
+                  padding: "7px 10px",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  color: "#000000",
+                }}
+              >
+                复制
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <Modal
         title="设置昵称"
@@ -2376,6 +2971,25 @@ export default function App() {
         />
       </Modal>
 
+      {isMobile && appVersion ? (
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 1,
+            paddingBottom: "max(2px, env(safe-area-inset-bottom, 0px))",
+            textAlign: "center",
+            pointerEvents: "none",
+          }}
+        >
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            v{appVersion}
+          </Typography.Text>
+        </div>
+      ) : null}
+
       <Modal
         title="局域网用户"
         open={lanUsersModalOpen}
@@ -2389,9 +3003,6 @@ export default function App() {
         destroyOnClose={false}
         {...DIALOG_TITLE_CENTER}
       >
-        <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 10, fontSize: 12 }}>
-          绿点表示当前在线，灰点表示不在线
-        </Typography.Paragraph>
         {(serverLanIp || "").trim() ? (
           <Typography.Paragraph type="secondary" style={{ marginBottom: 10, fontSize: 12 }}>
             <Typography.Text strong>服务地址：</Typography.Text>
@@ -2522,7 +3133,7 @@ export default function App() {
       <Drawer
         title="当前会话文件"
         placement="right"
-        width={Math.min(440, typeof window !== "undefined" ? window.innerWidth - 24 : 400)}
+        width={isMobile ? Math.min(440, typeof window !== "undefined" ? window.innerWidth - 24 : 400) : 560}
         onClose={() => setFileDrawer(false)}
         open={fileDrawer}
         {...DIALOG_TITLE_CENTER}

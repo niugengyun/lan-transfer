@@ -578,8 +578,41 @@ def chat_load_for_client(client_id: str) -> list[dict[str, Any]]:
             fc = (rec.get("from_client_id") or "").strip()
             if fc in ids or to_c in ids:
                 rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
+        elif t == "revoke":
+            to_c = (rec.get("to_client_id") or "").strip()
+            scope = str(rec.get("scope", "")).strip().lower()
+            is_group = (not to_c) or to_c == "__group__" or scope == "group"
+            if is_group:
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
+                continue
+            s = (rec.get("sender_client_id") or "").strip()
+            if s in ids or to_c in ids:
+                rows.append(_history_item_with_file_missing(_normalize_client_ids_in_record(rec)))
     rows.sort(key=lambda r: str(r.get("ts") or ""))
     return rows
+
+
+def chat_find_record_by_id(msg_id: str) -> Optional[dict[str, Any]]:
+    if not msg_id or not CHAT_LOG.is_file():
+        return None
+    with _CHAT_LOG_LOCK:
+        try:
+            text = CHAT_LOG.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("id") or "").strip() == msg_id:
+            return _normalize_client_ids_in_record(rec)
+    return None
 
 
 def chat_clear_all() -> None:
@@ -1061,7 +1094,9 @@ async def upload_file(
 
     fc = _canonical_peer_id((from_client_id or "").strip())
     tc = _canonical_peer_id((to_client_id or "").strip())
+    msg_id = uuid.uuid4().hex
     payload: dict[str, Any] = {
+        "id": msg_id,
         "type": "file",
         "stored_name": stored,
         "original_name": raw,
@@ -1411,6 +1446,67 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     }
                 )
                 continue
+            if mtype == "revoke":
+                target_id = str(msg.get("target_id") or "").strip()
+                if not target_id:
+                    continue
+                sender_cid = online_registry.client_id_for(websocket)
+                if not sender_cid:
+                    continue
+                target = chat_find_record_by_id(target_id)
+                if not target:
+                    await manager.send_json_to_websockets(
+                        [websocket],
+                        {"type": "error", "code": "revoke_not_found", "message": "未找到可撤回的消息。"},
+                    )
+                    continue
+                ttype = str(target.get("type") or "").strip().lower()
+                owner = ""
+                to_cid = ""
+                scope = ""
+                if ttype == "text":
+                    owner = str(target.get("sender_client_id") or "").strip()
+                    to_cid = str(target.get("to_client_id") or "").strip()
+                    scope = str(target.get("scope") or "").strip().lower()
+                elif ttype == "file":
+                    owner = str(target.get("from_client_id") or "").strip()
+                    to_cid = str(target.get("to_client_id") or "").strip()
+                    scope = "group" if not to_cid else ""
+                else:
+                    await manager.send_json_to_websockets(
+                        [websocket],
+                        {"type": "error", "code": "revoke_unsupported", "message": "该消息类型不支持撤回。"},
+                    )
+                    continue
+                if owner != sender_cid:
+                    await manager.send_json_to_websockets(
+                        [websocket],
+                        {"type": "error", "code": "revoke_forbidden", "message": "仅可撤回自己发送的消息。"},
+                    )
+                    continue
+                out = {
+                    "type": "message_revoked",
+                    "target_id": target_id,
+                    "sender_client_id": sender_cid,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+                is_group = (not to_cid) or to_cid == "__group__" or scope == "group"
+                if is_group:
+                    await manager.broadcast_json(out)
+                else:
+                    recipient_ws = _ws_for_cid(_canonical_peer_id(to_cid))
+                    await manager.send_json_to_websockets([websocket, recipient_ws], out)
+                chat_append_record(
+                    {
+                        "type": "revoke",
+                        "target_id": target_id,
+                        "sender_client_id": sender_cid,
+                        "to_client_id": to_cid or None,
+                        "scope": "group" if is_group else "",
+                        "ts": out["ts"],
+                    }
+                )
+                continue
             if mtype != "text":
                 continue
             body = str(msg.get("body", "")).strip()
@@ -1424,6 +1520,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             is_group = (not to_cid) or to_cid == "__group__" or scope_raw == "group"
             if is_group:
                 out = {
+                    "id": uuid.uuid4().hex,
                     "type": "text",
                     "from": nick_msg,
                     "body": body,
@@ -1453,6 +1550,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 )
                 continue
             out = {
+                "id": uuid.uuid4().hex,
                 "type": "text",
                 "from": nick_msg,
                 "body": body,

@@ -39,6 +39,14 @@ body {
   overflow: hidden;
 }
 
+/* 移动端禁用默认长按菜单（保留 input/textarea 可编辑能力） */
+.lan-app-shell,
+.lan-app-shell *:not(input):not(textarea):not([contenteditable="true"]) {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* 左侧栏 + 右侧聊天 的主横向区 */
 .lan-app-main {
   flex: 1 1 0%;
