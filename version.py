@@ -3,7 +3,7 @@
 APP_NAME = "lan-transfer"
 GITHUB_REPO = "niugengyun/lan-transfer"
 UPDATE_USER_AGENT = f"{APP_NAME}-updater"
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 
 def get_version() -> str:

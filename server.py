@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
 from urllib.parse import urlparse
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1573,6 +1574,59 @@ def _print_startup_info(port: int) -> None:
         print("  （未能自动检测，请在系统网络设置中查看本机 IPv4）", flush=True)
 
 
+def _has_windows_console() -> bool:
+    """Windows 下判断当前进程是否已附着控制台。"""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.kernel32.GetConsoleWindow())
+    except Exception:
+        return False
+
+
+def _open_admin_in_browser_when_ready(port: int) -> None:
+    """等待本机服务就绪后，自动在默认浏览器打开 /admin。"""
+
+    def _worker() -> None:
+        if _wait_health_local(port, timeout=20.0):
+            url = f"http://127.0.0.1:{port}/admin/"
+            try:
+                webbrowser.open(url, new=1)
+            except Exception as exc:
+                print(f"自动打开浏览器失败：{exc}", flush=True)
+
+    th = threading.Thread(target=_worker, name="open-admin-browser", daemon=True)
+    th.start()
+
+
+def _spawn_windows_fallback_console_hint(port: int) -> None:
+    """
+    WebView 失败时，在 Windows 弹出提示终端窗口，显示运行地址与说明。
+    仅在当前进程无控制台时触发，避免重复弹窗。
+    """
+    if sys.platform != "win32" or _has_windows_console():
+        return
+    local = f"http://127.0.0.1:{port}"
+    admin = f"{local}/admin"
+    cmd = (
+        "title LAN Transfer Fallback && "
+        "echo WebView 启动失败，已自动回退到仅控制台服务模式。 && "
+        f"echo 主站地址: {local} && "
+        f"echo 管理后台: {admin} && "
+        "echo 已尝试自动打开后台页面。 && "
+        "echo 可按 Ctrl+C 终止服务。"
+    )
+    try:
+        subprocess.Popen(
+            ["cmd.exe", "/k", cmd],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    except Exception as exc:
+        print(f"弹出回退终端失败：{exc}", flush=True)
+
+
 def _wait_health_local(port: int, timeout: float = 20.0) -> bool:
     """等待本机 HTTP 服务可响应（避免 WebView 白屏）。"""
     import urllib.error
@@ -1626,8 +1680,8 @@ def _use_webview_shell() -> bool:
     return True
 
 
-def _run_with_webview() -> None:
-    """后台线程跑 Uvicorn，主线程跑 pywebview 打开 /admin（关闭窗口后结束进程）。"""
+def _run_with_webview() -> bool:
+    """后台线程跑 Uvicorn，主线程跑 pywebview 打开 /admin。成功返回 True；失败时返回 False 供回退。"""
     import uvicorn
     import webview
 
@@ -1654,7 +1708,7 @@ def _run_with_webview() -> None:
         print("错误：本机服务在超时时间内未就绪，请检查端口是否被占用。", flush=True)
         server.should_exit = True
         th.join(timeout=5)
-        return
+        return False
 
     _print_startup_info(port)
     admin_url = f"http://127.0.0.1:{port}/admin/"
@@ -1664,18 +1718,30 @@ def _run_with_webview() -> None:
     if not icon_path:
         print("提示：未找到 icons/app_icon.icns（可先运行 python create_icon.py），程序坞可能显示 Python 默认图标。", flush=True)
 
-    webview.create_window(
-        "控制台",
-        admin_url,
-        width=1024,
-        height=720,
-        min_size=(640, 480),
-    )
     try:
-        if icon_path:
-            webview.start(icon=icon_path)
-        else:
-            webview.start()
+        webview.create_window(
+            "控制台",
+            admin_url,
+            width=1024,
+            height=720,
+            min_size=(640, 480),
+        )
+    except Exception as exc:
+        print(f"WebView 窗口创建失败，将回退为仅控制台模式：{exc}", flush=True)
+        server.should_exit = True
+        th.join(timeout=8)
+        return False
+
+    try:
+        try:
+            if icon_path:
+                webview.start(icon=icon_path)
+            else:
+                webview.start()
+            return True
+        except Exception as exc:
+            print(f"WebView 启动失败，将回退为仅控制台模式：{exc}", flush=True)
+            return False
     finally:
         server.should_exit = True
         th.join(timeout=8)
@@ -1774,8 +1840,11 @@ def main() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
 
     if _use_webview_shell():
-        _run_with_webview()
-        return
+        if _run_with_webview():
+            return
+        print("已自动回退：仅控制台服务模式（无 WebView 依赖）。", flush=True)
+        _spawn_windows_fallback_console_hint(port)
+        _open_admin_in_browser_when_ready(port)
 
     _print_startup_info(port)
     uvicorn.run(

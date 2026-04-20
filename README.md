@@ -33,7 +33,7 @@
 ├── server.py           # 主服务：HTTP / WS / 静态页 / 上传与聊天逻辑
 ├── requirements.txt    # Python 依赖
 ├── start.sh            # 可选（macOS/Linux）：创建 .venv、安装依赖并启动 server.py
-├── start.bat           # 可选（Windows）：同上，与 start.sh 行为对齐
+├── start.ps1           # 可选（Windows）：主启动脚本（与 start.sh 逻辑对齐）
 ├── frontend/           # 前端源码（Vite + React）
 ├── static/spa/         # 前端构建输出（部署前需 npm run build）
 ├── uploads/            # 用户上传文件（默认不入库，见 .gitignore）
@@ -68,6 +68,9 @@
 
 Node 仅在前端**开发**或**重新构建** `static/spa/` 时需要；只运行已构建的静态页时不必安装 Node。
 
+> 说明：Release 提供的 **Windows 打包版 `lan_transfer.exe`** 已包含 Python 运行时与依赖，目标机器通常**不需要安装 Python/Node.js**。  
+> 若机器缺少 WebView2 运行时，程序会自动回退为“仅控制台服务模式”（仍可通过浏览器访问 `/admin` 与主站）。
+
 ---
 
 ## 快速开始
@@ -89,10 +92,10 @@ chmod +x start.sh
 ./start.sh
 ```
 
-**Windows（在资源管理器中双击，或在「命令提示符 / PowerShell」中执行）：**
+**Windows（推荐在 PowerShell 中执行）：**
 
-```bat
-start.bat
+```powershell
+.\start.ps1
 ```
 
 需已安装 **Python**（`python` 或 `py -3` 可用）与 **Node.js**（`npm` 在 PATH 中）。
