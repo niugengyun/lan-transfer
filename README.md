@@ -19,6 +19,14 @@
 
 ---
 
+## 程序截图
+
+| 管理端 | 电脑端 | 手机端 |
+| --- | --- | --- |
+| ![管理端](./screenshot/screenshot1.png) | ![电脑端](./screenshot/screenshot2.png) | ![手机端](./screenshot/screenshot3.png) |
+
+---
+
 ## 技术栈
 
 - **后端**：**Python 3.9+**（推荐 **3.11 / 3.12**）、FastAPI、Uvicorn、WebSocket；本机默认 **pywebview** 管理壳（版本见 `requirements.txt`）  
